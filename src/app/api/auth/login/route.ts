@@ -26,6 +26,7 @@ export async function GET(req: NextRequest) {
     "user-read-email",
     "user-read-private",
     "user-top-read",
+    "user-read-recently-played",
     "playlist-read-private",
   ].join(" ");
 
@@ -39,10 +40,12 @@ export async function GET(req: NextRequest) {
   console.log("Redirect URI used:", redirectUri);
   console.log("✅ Redirecting user to Spotify authorization");
   const res = NextResponse.redirect(url.toString());
+  // Set cookie security based on redirect URI protocol
+  const secure = redirectUri.startsWith("https://");
   res.cookies.set("spotify_oauth_state", state, {
     httpOnly: true,
-    secure: true,
-    sameSite: "lax",
+    secure,
+    sameSite: secure ? "none" : "lax", // "none" required for cross-site HTTPS
     path: "/",
     maxAge: 10 * 60,
   });

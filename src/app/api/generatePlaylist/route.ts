@@ -82,6 +82,56 @@ async function getAvailableGenreSeeds(token: string): Promise<string[]> {
   return seeds;
 }
 
+// In-memory, per-user cache for personalization seeds to reduce API calls (TTL 10 minutes)
+type PersonalSeeds = {
+  userId: string;
+  username?: string;
+  topArtistIds: string[];
+  topTrackIds: string[];
+  recentTrackIds: string[];
+  ts: number;
+};
+const PERSONAL_CACHE = new Map<string, PersonalSeeds>();
+
+async function fetchPersonalSeeds(userToken: string): Promise<PersonalSeeds | null> {
+  try {
+    // Identify user
+    const meRes = await fetch("https://api.spotify.com/v1/me", { headers: { Authorization: `Bearer ${userToken}` }, cache: "no-store" });
+    if (!meRes.ok) return null;
+    const me = (await meRes.json()) as any;
+    const userId = String(me?.id ?? "");
+    if (!userId) return null;
+
+    // Cache hit?
+    const cached = PERSONAL_CACHE.get(userId);
+    const now = Date.now();
+    if (cached && now - cached.ts < 10 * 60 * 1000) return cached;
+
+    const [topArtistsRes, topTracksRes, recentRes] = await Promise.all([
+      fetch("https://api.spotify.com/v1/me/top/artists?limit=5&time_range=medium_term", { headers: { Authorization: `Bearer ${userToken}` }, cache: "no-store" }),
+      fetch("https://api.spotify.com/v1/me/top/tracks?limit=5", { headers: { Authorization: `Bearer ${userToken}` }, cache: "no-store" }),
+      fetch("https://api.spotify.com/v1/me/player/recently-played?limit=10", { headers: { Authorization: `Bearer ${userToken}` }, cache: "no-store" }),
+    ]);
+
+    const topArtistIds: string[] = topArtistsRes.ok ? (((await topArtistsRes.json()) as any)?.items ?? []).map((a: any) => a.id) : [];
+    const topTrackIds: string[] = topTracksRes.ok ? (((await topTracksRes.json()) as any)?.items ?? []).map((t: any) => t.id) : [];
+    const recentTrackIds: string[] = recentRes.ok ? ((((await recentRes.json()) as any)?.items ?? []).map((it: any) => it?.track?.id).filter(Boolean)) : [];
+
+    const seeds: PersonalSeeds = {
+      userId,
+      username: me?.display_name ?? undefined,
+      topArtistIds,
+      topTrackIds,
+      recentTrackIds,
+      ts: now,
+    };
+    PERSONAL_CACHE.set(userId, seeds);
+    return seeds;
+  } catch {
+    return null;
+  }
+}
+
 // Search API fallback that is more tolerant to genre wording
 const MOOD_TO_QUERY: Record<string, string> = {
   Happy: 'pop OR dance OR party',
@@ -141,6 +191,16 @@ export async function POST(req: NextRequest) {
       else selectedMood = "Happy";
     }
 
+    // Mood targets for valence/energy/danceability
+    const MOOD_TARGETS: Record<string, Partial<Record<'target_valence' | 'target_energy' | 'target_danceability', number>>> = {
+      Happy: { target_valence: 0.85, target_energy: 0.7, target_danceability: 0.7 },
+      Sad: { target_valence: 0.3, target_energy: 0.35 },
+      Chill: { target_energy: 0.4, target_valence: 0.5 },
+      Energetic: { target_energy: 0.9, target_danceability: 0.85, target_valence: 0.7 },
+      Romantic: { target_valence: 0.65, target_energy: 0.55 },
+      Focus: { target_energy: 0.35, target_valence: 0.5 },
+    };
+
     // Try Recommendations first with validated seeds (+ personalized seeds when available); on failure, fall back to Search
     let tracks: Track[] = [];
     try {
@@ -162,34 +222,37 @@ export async function POST(req: NextRequest) {
       // Collect personalized seeds if user is logged in
       let seedArtists: string[] = [];
       let seedTracks: string[] = [];
+      let personalizedUsername: string | undefined;
+      let recentIds: string[] = [];
       if (userAccessToken) {
         try {
-          const [topArtistsRes, topTracksRes] = await Promise.all([
-            fetch("https://api.spotify.com/v1/me/top/artists?limit=5", { headers: { Authorization: `Bearer ${userAccessToken}` }, cache: "no-store" }),
-            fetch("https://api.spotify.com/v1/me/top/tracks?limit=5", { headers: { Authorization: `Bearer ${userAccessToken}` }, cache: "no-store" }),
-          ]);
-          if (topArtistsRes.ok) {
-            const ja = (await topArtistsRes.json()) as any;
-            seedArtists = (ja?.items ?? []).slice(0, 2).map((a: any) => a.id);
+          const seeds = await fetchPersonalSeeds(userAccessToken);
+          if (seeds) {
+            personalizedUsername = seeds.username;
+            seedArtists = (seeds.topArtistIds ?? []).slice(0, 2);
+            seedTracks = (seeds.topTrackIds ?? []).slice(0, 2);
+            recentIds = (seeds.recentTrackIds ?? []).slice(0, 2);
           }
-          if (topTracksRes.ok) {
-            const jt = (await topTracksRes.json()) as any;
-            seedTracks = (jt?.items ?? []).slice(0, 2).map((t: any) => t.id);
-          }
-          console.log("✅ Personalized seeds:", { artists: seedArtists.length, tracks: seedTracks.length });
+          console.log("✅ Personalized seeds:", { artists: seedArtists.length, tracks: seedTracks.length, recents: recentIds.length });
         } catch (e) {
           console.warn("[Spotify] Could not fetch user tops:", e);
         }
       }
       // Compose up to 5 total seeds across genres/artists/tracks
-      const seedCsv = seeds.slice(0, Math.max(0, 5 - seedArtists.length - seedTracks.length)).join(",");
+      // Prefer user seeds first; Spotify allows up to 5 across artists/tracks/genres combined
+      const roomForGenres = Math.max(0, 5 - seedArtists.length - seedTracks.length - recentIds.length);
+      const seedCsv = seeds.slice(0, roomForGenres).join(",");
       tracks = await (async () => {
         const url = new URL("https://api.spotify.com/v1/recommendations");
         url.searchParams.set("seed_genres", seedCsv);
         if (seedArtists.length) url.searchParams.set("seed_artists", seedArtists.slice(0, 2).join(","));
-        if (seedTracks.length) url.searchParams.set("seed_tracks", seedTracks.slice(0, 2).join(","));
-        url.searchParams.set("limit", String(7));
+        // Include some tracks from top and recent, respecting overall seed count
+        const trackSeeds = [...seedTracks, ...recentIds].slice(0, Math.max(0, 5 - seedArtists.length - (seedCsv ? seedCsv.split(',').length : 0)));
+        if (trackSeeds.length) url.searchParams.set("seed_tracks", trackSeeds.join(","));
+        url.searchParams.set("limit", String(20));
         url.searchParams.set("market", "US");
+        const targets = MOOD_TARGETS[selectedMood] ?? {};
+        for (const [k, v] of Object.entries(targets)) url.searchParams.set(k, String(v));
         const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
         if (!res.ok) throw new Error(`Recommendations failed: ${res.status}`);
         const json = (await res.json()) as any;
@@ -202,6 +265,8 @@ export async function POST(req: NextRequest) {
         })) as Track[];
       })();
       if (!tracks.length) throw new Error("Recommendations empty");
+      console.log("✅ Spotify personalized playlist fetched for mood:", selectedMood, "count:", tracks.length);
+      return NextResponse.json({ ok: true, mood: selectedMood, tracks, meta: { personalized: Boolean(userAccessToken), username: personalizedUsername } });
     } catch (recErr) {
       console.warn("⚠️ Fallback to search:", MOOD_TO_QUERY[selectedMood] ?? "pop");
       // Pull a larger set then pick the best 5–7
@@ -232,8 +297,8 @@ export async function POST(req: NextRequest) {
         }
       }
     }
-    console.log("✅ Spotify playlist fetched for mood:", selectedMood, "count:", tracks.length);
-    return NextResponse.json({ ok: true, message: "✅ Spotify playlist fetched", mood: selectedMood, tracks });
+    console.log("✅ Spotify playlist fetched (fallback) for mood:", selectedMood, "count:", tracks.length);
+    return NextResponse.json({ ok: true, message: "✅ Spotify playlist fetched", mood: selectedMood, tracks, meta: { personalized: false } });
   } catch (err: any) {
     console.error("[API /generatePlaylist] Error:", err);
     return NextResponse.json({ ok: false, error: err?.message ?? "Unknown error" }, { status: 200 });

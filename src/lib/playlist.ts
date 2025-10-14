@@ -5,6 +5,11 @@ export type Track = {
   previewUrl?: string | null;
 };
 
+export type PersonalizationMeta = {
+  personalized?: boolean;
+  username?: string;
+};
+
 const titles = [
   "Neon Dreams",
   "Midnight Coffee",
@@ -81,32 +86,32 @@ export function analyzePrompt(prompt: string):
 }
 
 // Client-side wrappers to call our API. Falls back to mock on failure.
-export async function fetchPlaylistByMood(mood: string): Promise<{ tracks: Track[]; usedMock: boolean }> {
+export async function fetchPlaylistByMood(mood: string): Promise<{ tracks: Track[]; usedMock: boolean; meta?: PersonalizationMeta }> {
   try {
     const res = await fetch("/api/generatePlaylist", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mood }),
     });
-    const data = (await res.json()) as { ok: boolean; tracks?: Track[] };
-    if (data.ok && data.tracks && data.tracks.length) return { tracks: data.tracks, usedMock: false };
-    return { tracks: generatePlaylist(mood), usedMock: true };
+    const data = (await res.json()) as { ok: boolean; tracks?: Track[]; meta?: PersonalizationMeta };
+    if (data.ok && data.tracks && data.tracks.length) return { tracks: data.tracks, usedMock: false, meta: data.meta };
+    return { tracks: generatePlaylist(mood), usedMock: true, meta: undefined };
   } catch {
-    return { tracks: generatePlaylist(mood), usedMock: true };
+    return { tracks: generatePlaylist(mood), usedMock: true, meta: undefined };
   }
 }
 
-export async function fetchPlaylistByPrompt(prompt: string): Promise<{ tracks: Track[]; usedMock: boolean }> {
+export async function fetchPlaylistByPrompt(prompt: string): Promise<{ tracks: Track[]; usedMock: boolean; meta?: PersonalizationMeta }> {
   try {
     const res = await fetch("/api/generatePlaylist", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt }),
     });
-    const data = (await res.json()) as { ok: boolean; tracks?: Track[] };
-    if (data.ok && data.tracks && data.tracks.length) return { tracks: data.tracks, usedMock: false };
-    return { tracks: generatePlaylistFromPrompt(prompt), usedMock: true };
+    const data = (await res.json()) as { ok: boolean; tracks?: Track[]; meta?: PersonalizationMeta };
+    if (data.ok && data.tracks && data.tracks.length) return { tracks: data.tracks, usedMock: false, meta: data.meta };
+    return { tracks: generatePlaylistFromPrompt(prompt), usedMock: true, meta: undefined };
   } catch {
-    return { tracks: generatePlaylistFromPrompt(prompt), usedMock: true };
+    return { tracks: generatePlaylistFromPrompt(prompt), usedMock: true, meta: undefined };
   }
 }

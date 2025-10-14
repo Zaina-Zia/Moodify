@@ -5,13 +5,14 @@ import { MoodSelection } from "@/components/mood-selection";
 import { CustomMoodInput } from "@/components/custom-mood-input";
 import { Separator } from "@/components/ui/separator";
 import { Headphones } from "lucide-react";
-import { fetchPlaylistByMood, fetchPlaylistByPrompt, analyzePrompt, type Track } from "@/lib/playlist";
+import { fetchPlaylistByMood, fetchPlaylistByPrompt, analyzePrompt, type Track, type PersonalizationMeta } from "@/lib/playlist";
 import { PlaylistResult, LoadingPlaylist } from "@/components/playlist-result";
 
 export default function Page() {
   const [customMood, setCustomMood] = useState("");
   const [loading, setLoading] = useState(false);
   const [tracks, setTracks] = useState<Track[] | null>(null);
+  const [meta, setMeta] = useState<PersonalizationMeta | undefined>(undefined);
   const [lastQuery, setLastQuery] = useState<string | null>(null);
   const [me, setMe] = useState<{ display_name?: string; images?: { url: string }[] } | null>(null);
 
@@ -34,13 +35,14 @@ export default function Page() {
     setLoading(true);
     setTracks(null);
     setTimeout(async () => {
-      const { tracks: list, usedMock } = await fetchPlaylistByMood(mood);
+      const { tracks: list, usedMock, meta } = await fetchPlaylistByMood(mood);
       if (usedMock) {
         // Minimal friendly notice
         console.warn("Couldn’t fetch Spotify playlist, showing mock vibes instead 🎧");
         if (typeof window !== "undefined") alert("Couldn’t fetch playlist, showing mock vibes instead 🎧");
       }
       setTracks(list);
+      setMeta(meta);
       setLoading(false);
     }, 1000);
   };
@@ -54,12 +56,13 @@ export default function Page() {
     setTracks(null);
     setTimeout(async () => {
       const derivedMood = analyzePrompt(prompt);
-      const { tracks: list, usedMock } = await fetchPlaylistByMood(derivedMood);
+      const { tracks: list, usedMock, meta } = await fetchPlaylistByMood(derivedMood);
       if (usedMock) {
         console.warn("Couldn’t fetch Spotify playlist, showing mock vibes instead 🎧");
         if (typeof window !== "undefined") alert("Couldn’t fetch playlist, showing mock vibes instead 🎧");
       }
       setTracks(list);
+      setMeta(meta);
       setLoading(false);
     }, 1000);
   };
@@ -128,8 +131,14 @@ export default function Page() {
               setLoading(false);
               setCustomMood("");
               setLastQuery(null);
+              setMeta(undefined);
             }}
           />
+        )}
+        {tracks && meta?.personalized && (
+          <div className="mt-3 text-sm text-muted-foreground">
+            🎧 Personalized {meta?.username ? `for @${meta.username}` : "for you"} based on your recent listening.
+          </div>
         )}
       </div>
     </main>

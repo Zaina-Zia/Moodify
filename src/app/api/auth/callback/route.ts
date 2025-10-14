@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(req: NextRequest) {
-  const clientId = process.env.SPOTIFY_CLIENT_ID?.trim();
-  const clientSecret = process.env.SPOTIFY_CLIENT_SECRET?.trim();
+  const sanitize = (v?: string) => v?.trim().replace(/^"|"$/g, "").replace(/\r|\n/g, "");
+  const clientId = sanitize(process.env.SPOTIFY_CLIENT_ID);
+  const clientSecret = sanitize(process.env.SPOTIFY_CLIENT_SECRET);
   const redirectUri = process.env.SPOTIFY_REDIRECT_URI?.trim() || `${req.nextUrl.origin}/api/auth/callback`;
   if (!clientId || !clientSecret || !redirectUri) {
     return NextResponse.json({ ok: false, error: "Missing Spotify envs" }, { status: 500 });
@@ -15,6 +16,9 @@ export async function GET(req: NextRequest) {
 
   console.log("Redirect URI used:", redirectUri);
   console.log("Authorization code received:", Boolean(code));
+  console.log("State from URL:", state);
+  console.log("State from cookie:", cookieState);
+  console.log("States match:", state === cookieState);
   if (!code || !state || !cookieState || state !== cookieState) {
     return NextResponse.json({ ok: false, error: "Invalid OAuth state" }, { status: 400 });
   }
@@ -35,7 +39,13 @@ export async function GET(req: NextRequest) {
 
   if (!tokenRes.ok) {
     const txt = await tokenRes.text().catch(() => "");
-    console.error("❌ Token exchange failed:", tokenRes.status, txt);
+    console.error(
+      "❌ Token exchange failed:",
+      tokenRes.status,
+      txt,
+      "| debug:",
+      { clientIdPrefix: clientId.slice(0, 8), secretLen: clientSecret.length }
+    );
     return NextResponse.json({ ok: false, error: `Token exchange failed: ${tokenRes.status}`, details: txt }, { status: 400 });
   }
 
@@ -48,7 +58,7 @@ export async function GET(req: NextRequest) {
   };
 
   console.log("✅ Token successfully received");
-  const res = NextResponse.redirect("/");
+  const res = NextResponse.redirect(new URL("/", redirectUri));
   // Store tokens in httpOnly cookies; secure depends on protocol
   const secure = redirectUri.startsWith("https://");
   res.cookies.set("spotify_access_token", tokenJson.access_token, {
