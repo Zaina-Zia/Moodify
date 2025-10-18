@@ -37,14 +37,14 @@ export function PlaylistResult({
               className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-3 shadow-sm"
             >
               <div className="flex items-center gap-3">
-                <div className="relative h-16 w-16 overflow-hidden rounded-md">
+                <div className="overflow-hidden rounded-md">
                   <Image
                     src={t.cover}
                     alt={t.title}
-                    fill
-                    className="object-cover"
+                    width={64}
+                    height={64}
+                    className="h-16 w-16 object-cover"
                     unoptimized
-                    sizes="64px"
                   />
                 </div>
                 <div className="min-w-0">
@@ -52,7 +52,7 @@ export function PlaylistResult({
                   <p className="truncate text-xs text-[hsl(var(--muted-foreground))]">{t.artist}</p>
                 </div>
               </div>
-              <PreviewControl url={t.previewUrl ?? undefined} />
+              <PreviewControl url={t.previewUrl ?? undefined} durationMs={t.durationMs} />
             </motion.li>
           ))}
         </motion.ul>
@@ -62,9 +62,11 @@ export function PlaylistResult({
 }
 
 // Preview button + hidden audio element to play 30s sample when available
-function PreviewControl({ url }: { url?: string }) {
+function PreviewControl({ url, durationMs }: { url?: string; durationMs?: number }) {
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = React.useState(false);
+  const [progress, setProgress] = React.useState(0); // 0..1
+  const totalMs = typeof durationMs === "number" && durationMs > 0 ? durationMs : undefined;
 
   React.useEffect(() => {
     return () => {
@@ -99,13 +101,46 @@ function PreviewControl({ url }: { url?: string }) {
   };
 
   return (
-    <div className="mt-2 flex items-center gap-2">
-      <Button onClick={onToggle} className="h-8 px-3 text-xs">
-        {playing ? "⏸ Pause" : "▶️ Play Preview"}
-      </Button>
-      <audio ref={audioRef} src={url} preload="none" onEnded={() => setPlaying(false)} />
+    <div className="mt-2">
+      <div className="flex items-center gap-2">
+        <Button onClick={onToggle} className="h-8 px-3 text-xs">
+          {playing ? "⏸ Pause" : "▶️ Play Preview"}
+        </Button>
+        {typeof totalMs === "number" ? (
+          <span className="text-xs text-[hsl(var(--muted-foreground))]">{formatMs(totalMs)}</span>
+        ) : null}
+      </div>
+      <div className="mt-2 h-1 w-full overflow-hidden rounded bg-[hsl(var(--muted))]">
+        <div
+          className="h-full bg-[hsl(var(--primary))]"
+          style={{ width: `${Math.max(0, Math.min(1, progress)) * 100}%` }}
+        />
+      </div>
+      <audio
+        ref={audioRef}
+        src={url}
+        preload="metadata"
+        controls
+        controlsList="nodownload noplaybackrate"
+        onEnded={() => {
+          setPlaying(false);
+          setProgress(0);
+        }}
+        onTimeUpdate={(e) => {
+          const el = e.currentTarget;
+          const d = el.duration || (totalMs ? totalMs / 1000 : 0);
+          if (d > 0) setProgress(el.currentTime / d);
+        }}
+      />
     </div>
   );
+}
+
+function formatMs(ms: number) {
+  const totalSec = Math.round(ms / 1000);
+  const mm = Math.floor(totalSec / 60);
+  const ss = totalSec % 60;
+  return `${mm}:${ss.toString().padStart(2, "0")}`;
 }
 
 export function LoadingPlaylist({ count = 4 }: { count?: number }) {

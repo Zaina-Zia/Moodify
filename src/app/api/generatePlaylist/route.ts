@@ -71,6 +71,63 @@ async function fetchMusicBrainzByTag(tag: string, limit = 25): Promise<MBRecordi
     console.warn("[MusicBrainz] search failed:", res.status, body);
     return [];
   }
+
+// Fetch top tracks for a list of artists using the user token
+async function fetchArtistsTopTracks(userToken: string, artistIds: string[], market = "US", perArtist = 2, cap = 8): Promise<Track[]> {
+  const out: Track[] = [];
+  const seen = new Set<string>();
+  for (const id of artistIds) {
+    try {
+      const u = new URL(`https://api.spotify.com/v1/artists/${encodeURIComponent(id)}/top-tracks`);
+      u.searchParams.set("market", market);
+      const res = await fetch(u.toString(), { headers: { Authorization: `Bearer ${userToken}` }, cache: "no-store" });
+      if (!res.ok) continue;
+      const j = (await res.json()) as any;
+      const tracks: any[] = j?.tracks ?? [];
+      let added = 0;
+      for (const t of tracks) {
+        const key = `${t?.name}@@${(t?.artists?.map((a: any) => a?.name) ?? []).join(', ')}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({
+          title: t?.name ?? "",
+          artist: (t?.artists?.map((a: any) => a?.name) ?? []).join(", "),
+          cover: t?.album?.images?.[1]?.url || t?.album?.images?.[0]?.url || "",
+          previewUrl: t?.preview_url || null,
+          spotifyUrl: t?.external_urls?.spotify || (t?.id ? `https://open.spotify.com/track/${t.id}` : undefined),
+        });
+        added++;
+        if (added >= perArtist) break;
+        if (out.length >= cap) break;
+      }
+      if (out.length >= cap) break;
+    } catch {}
+  }
+  return out;
+}
+
+// Add Spotify recommendations using user's top artists/tracks + mood seeds (if logged-in)
+// ... (rest of the code remains the same)
+// Fetch recommendations seeded by user's top artists/tracks and mood seeds
+async function fetchRecommendationsWithSeeds(bearer: string, seeds: { artists?: string[]; tracks?: string[]; genres?: string[] }, limit = 10, market = "US"): Promise<Track[]> {
+  const url = new URL("https://api.spotify.com/v1/recommendations");
+  if (seeds.artists?.length) url.searchParams.set("seed_artists", seeds.artists.slice(0, 5).join(","));
+  if (seeds.tracks?.length) url.searchParams.set("seed_tracks", seeds.tracks.slice(0, 5).join(","));
+  if (seeds.genres?.length) url.searchParams.set("seed_genres", seeds.genres.slice(0, 5).join(","));
+  url.searchParams.set("limit", String(Math.max(1, Math.min(20, limit))));
+  url.searchParams.set("market", market);
+  const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${bearer}` }, cache: "no-store" });
+  if (!res.ok) return [];
+  const json = (await res.json()) as any;
+  const items: any[] = json?.tracks ?? [];
+  return items.map((t) => ({
+    title: t?.name ?? "",
+    artist: (t?.artists?.map((a: any) => a?.name) ?? []).join(", "),
+    cover: t?.album?.images?.[1]?.url || t?.album?.images?.[0]?.url || "",
+    previewUrl: t?.preview_url || null,
+    spotifyUrl: t?.external_urls?.spotify || (t?.id ? `https://open.spotify.com/track/${t.id}` : undefined),
+  }));
+}
   const json = (await res.json()) as any;
   const recs = (json?.recordings ?? []) as any[];
   const out: MBRecording[] = [];
@@ -338,6 +395,7 @@ type PersonalSeeds = {
   userId: string;
   username?: string;
   topArtistIds: string[];
+  topArtistNames: string[];
   topTrackIds: string[];
   recentTrackIds: string[];
   ts: number;
@@ -364,7 +422,9 @@ async function fetchPersonalSeeds(userToken: string): Promise<PersonalSeeds | nu
       fetch("https://api.spotify.com/v1/me/player/recently-played?limit=10", { headers: { Authorization: `Bearer ${userToken}` }, cache: "no-store" }),
     ]);
 
-    const topArtistIds: string[] = topArtistsRes.ok ? (((await topArtistsRes.json()) as any)?.items ?? []).map((a: any) => a.id) : [];
+    const topArtistsJson: any = topArtistsRes.ok ? await topArtistsRes.json() : { items: [] };
+    const topArtistIds: string[] = (topArtistsJson?.items ?? []).map((a: any) => a.id);
+    const topArtistNames: string[] = (topArtistsJson?.items ?? []).map((a: any) => a?.name).filter(Boolean);
     const topTrackIds: string[] = topTracksRes.ok ? (((await topTracksRes.json()) as any)?.items ?? []).map((t: any) => t.id) : [];
     const recentTrackIds: string[] = recentRes.ok ? ((((await recentRes.json()) as any)?.items ?? []).map((it: any) => it?.track?.id).filter(Boolean)) : [];
 
@@ -372,6 +432,7 @@ async function fetchPersonalSeeds(userToken: string): Promise<PersonalSeeds | nu
       userId,
       username: me?.display_name ?? undefined,
       topArtistIds,
+      topArtistNames,
       topTrackIds,
       recentTrackIds,
       ts: now,
@@ -442,7 +503,13 @@ export async function POST(req: NextRequest) {
       else selectedMood = "Happy";
     }
 
-    // MusicBrainz -> ListenBrainz popularity -> Spotify mapping
+    // Optional personalization (requires logged-in user token via cookies)
+    let personal: PersonalSeeds | null = null;
+    if (userAccessToken) {
+      personal = await fetchPersonalSeeds(userAccessToken).catch(() => null);
+    }
+
+    // MusicBrainz -> ListenBrainz popularity -> Spotify mapping (biased by user top artists when available)
     const tag = (selectedMood || "").toLowerCase();
     // Pull 25 MB recordings, then enrich with LB popularity
     const mb = await fetchMusicBrainzByTag(tag, 25);
@@ -455,10 +522,49 @@ export async function POST(req: NextRequest) {
       const pops = await Promise.all(b.map((r) => fetchListenBrainzRecordingPopularity(r.id)));
       for (let i = 0; i < b.length; i++) scored.push({ ...b[i], popularity: pops[i] ?? 0 });
     }
+    // Sort by popularity, then boost entries by user's top artists (if any)
     scored.sort((a, b) => (b.popularity ?? 0) - (a.popularity ?? 0));
+    if (personal?.topArtistNames?.length) {
+      const topSet = new Set(personal.topArtistNames.map((s) => s.toLowerCase()));
+      scored.sort((a, b) => {
+        const ab = topSet.has((a.artist || '').toLowerCase()) ? 1 : 0;
+        const bb = topSet.has((b.artist || '').toLowerCase()) ? 1 : 0;
+        if (ab !== bb) return bb - ab; // put boosted first
+        return 0;
+      });
+    }
     // Map to Spotify
     const results: Track[] = [];
     const seen = new Set<string>();
+
+    // Prepend user's top tracks (if any), preserving mood context but prioritizing user's taste
+    if (personal?.topTrackIds?.length) {
+      try {
+        const ids = Array.from(new Set(personal.topTrackIds)).slice(0, 10);
+        if (ids.length) {
+          const url = new URL("https://api.spotify.com/v1/tracks");
+          url.searchParams.set("ids", ids.join(","));
+          const resTop = await fetch(url.toString(), { headers: { Authorization: `Bearer ${userAccessToken}` }, cache: "no-store" });
+          if (resTop.ok) {
+            const jTop = (await resTop.json()) as any;
+            const items: any[] = jTop?.tracks ?? [];
+            for (const t of items) {
+              const key = `${t?.name}@@${(t?.artists?.map((a: any) => a?.name) ?? []).join(', ')}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              results.push({
+                title: t?.name ?? "",
+                artist: (t?.artists?.map((a: any) => a?.name) ?? []).join(", "),
+                cover: t?.album?.images?.[1]?.url || t?.album?.images?.[0]?.url || "",
+                previewUrl: t?.preview_url || null,
+                spotifyUrl: t?.external_urls?.spotify || (t?.id ? `https://open.spotify.com/track/${t.id}` : undefined),
+              });
+              if (results.length >= 10) break;
+            }
+          }
+        }
+      } catch {}
+    }
     for (const r of scored) {
       const key = `${r.title}@@${r.artist}`;
       if (seen.has(key)) continue;

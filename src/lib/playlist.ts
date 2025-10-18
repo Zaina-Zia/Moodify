@@ -3,6 +3,7 @@ export type Track = {
   artist: string;
   cover: string;
   previewUrl?: string | null;
+  durationMs?: number;
 };
 
 export type PersonalizationMeta = {
@@ -93,8 +94,11 @@ export async function fetchPlaylistByMood(mood: string): Promise<{ tracks: Track
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mood }),
     });
-    const data = (await res.json()) as { ok: boolean; tracks?: Track[]; meta?: PersonalizationMeta };
-    if (data.ok && data.tracks && data.tracks.length) return { tracks: data.tracks, usedMock: false, meta: data.meta };
+    const data = (await res.json()) as { ok: boolean; tracks?: Track[]; meta?: PersonalizationMeta; mood?: string };
+    if (data.ok && data.tracks && data.tracks.length) {
+      const enriched = await enrichTracksWithSpotifyPreview(data.tracks, data.mood);
+      return { tracks: enriched, usedMock: false, meta: data.meta };
+    }
     return { tracks: generatePlaylist(mood), usedMock: true, meta: undefined };
   } catch {
     return { tracks: generatePlaylist(mood), usedMock: true, meta: undefined };
@@ -108,10 +112,61 @@ export async function fetchPlaylistByPrompt(prompt: string): Promise<{ tracks: T
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt }),
     });
-    const data = (await res.json()) as { ok: boolean; tracks?: Track[]; meta?: PersonalizationMeta };
-    if (data.ok && data.tracks && data.tracks.length) return { tracks: data.tracks, usedMock: false, meta: data.meta };
+    const data = (await res.json()) as { ok: boolean; tracks?: Track[]; meta?: PersonalizationMeta; mood?: string };
+    if (data.ok && data.tracks && data.tracks.length) {
+      const enriched = await enrichTracksWithSpotifyPreview(data.tracks, data.mood);
+      return { tracks: enriched, usedMock: false, meta: data.meta };
+    }
     return { tracks: generatePlaylistFromPrompt(prompt), usedMock: true, meta: undefined };
   } catch {
     return { tracks: generatePlaylistFromPrompt(prompt), usedMock: true, meta: undefined };
+  }
+}
+
+async function enrichTracksWithSpotifyPreview(tracks: Track[], mood?: string): Promise<Track[]> {
+  try {
+    const body = {
+      tracks: tracks.map((t) => ({ title: t.title, artist: t.artist })),
+      limit_per_track_search: 3,
+      concurrency_limit: 3,
+      mood: mood ?? null,
+      market: "US",
+    };
+    const res = await fetch("/api/spotifyPreview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = (await res.json()) as {
+      results?: Array<{
+        title: string;
+        artist: string;
+        previews?: Array<{ name?: string; preview_url?: string | null; spotify_url?: string | null }>;
+        error?: string;
+      }>;
+      error?: string;
+    };
+    if (!data.results) return tracks;
+
+    // Server now only returns tracks that have previews. Build a new list from results.
+    const norm = (s: string) => s.trim().toLowerCase();
+    const mapped = data.results.map((r) => {
+      const first = r?.previews && r.previews.length ? r.previews[0] : undefined;
+      // Try to carry over cover/duration by matching original entries
+      const match = tracks.find(
+        (t) => norm(t.title) === norm(r.title) && norm(t.artist) === norm(r.artist)
+      );
+      return {
+        title: r.title,
+        artist: r.artist,
+        cover: match?.cover || "",
+        previewUrl: first?.preview_url ?? null,
+        durationMs: match?.durationMs,
+      } as Track;
+    });
+
+    return mapped.length ? mapped : tracks;
+  } catch {
+    return tracks;
   }
 }
