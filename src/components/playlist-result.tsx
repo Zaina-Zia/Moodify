@@ -1,23 +1,32 @@
-"use client";
+"use client"
 
-import { motion, AnimatePresence } from "framer-motion";
-import Image from "next/image";
-import { Button } from "@/components/ui/button";
-import type { Track } from "@/lib/playlist";
-import * as React from "react";
+import { motion, AnimatePresence } from "framer-motion"
+import Image from "next/image"
+import { Button } from "@/components/ui/button"
+import type { Track } from "@/lib/playlist"
+import * as React from "react"
 
 export function PlaylistResult({
   tracks,
   onBack,
 }: {
-  tracks: Track[];
-  onBack: () => void;
+  tracks: Track[]
+  onBack: () => void
 }) {
   return (
-    <div className="mt-8">
-      <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-xl font-semibold">Your personalized playlist</h2>
-        <Button variant="outline" onClick={onBack}>Try another mood</Button>
+    <div className="mt-8 sm:mt-10 md:mt-12">
+      <div className="mb-6 flex flex-col gap-3 sm:mb-8 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-2xl font-bold text-[hsl(var(--foreground))] sm:text-3xl">Your personalized playlist</h2>
+          <p className="mt-1 text-sm text-[hsl(var(--muted-foreground))]">Curated just for your mood</p>
+        </div>
+        <Button
+          variant="outline"
+          onClick={onBack}
+          className="w-full sm:w-auto text-white border-primary/30 hover:border-primary/60 hover:bg-primary/10 bg-transparent"
+        >
+          Try another mood
+        </Button>
       </div>
       <AnimatePresence mode="wait">
         <motion.ul
@@ -26,7 +35,7 @@ export function PlaylistResult({
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -8 }}
           transition={{ duration: 0.25 }}
-          className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3"
+          className="grid grid-cols-1 gap-4 sm:gap-5 md:grid-cols-2 lg:grid-cols-3"
         >
           {tracks.map((t, i) => (
             <motion.li
@@ -34,135 +43,143 @@ export function PlaylistResult({
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.25, delay: i * 0.08 }}
-              className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-3 shadow-sm"
+              className="group overflow-hidden rounded-2xl border border-[hsl(var(--border))] bg-gradient-to-br from-[hsl(var(--card))] to-[hsl(var(--card))]/80 shadow-lg transition-all duration-300 hover:border-[hsl(var(--primary))]/50 hover:shadow-2xl hover:shadow-[hsl(var(--primary))]/10"
             >
-              <div className="flex items-center gap-3">
-                <div className="overflow-hidden rounded-md">
+              <div className="p-4 sm:p-5">
+                {/* Album Art */}
+                <div className="mb-4 overflow-hidden rounded-xl ring-2 ring-[hsl(var(--primary))]/20 transition-all duration-300 group-hover:ring-[hsl(var(--primary))]/40">
                   <Image
-                    src={t.cover}
+                    src={t.cover || "/placeholder.svg"}
                     alt={t.title}
-                    width={64}
-                    height={64}
-                    className="h-16 w-16 object-cover"
+                    width={200}
+                    height={200}
+                    className="h-32 w-full object-cover sm:h-40 transition-transform duration-300 group-hover:scale-105"
                     unoptimized
                   />
                 </div>
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{t.title}</p>
-                  <p className="truncate text-xs text-[hsl(var(--muted-foreground))]">{t.artist}</p>
+
+                {/* Song Info */}
+                <div className="mb-4">
+                  <p className="line-clamp-2 text-sm font-bold text-[hsl(var(--foreground))] sm:text-base">{t.title}</p>
+                  <p className="mt-1 line-clamp-1 text-xs text-[hsl(var(--muted-foreground))] sm:text-sm">{t.artist}</p>
                 </div>
+
+                {/* Preview Control */}
+                <PreviewControl url={t.previewUrl ?? undefined} durationMs={t.durationMs} />
               </div>
-              <PreviewControl url={t.previewUrl ?? undefined} durationMs={t.durationMs} />
             </motion.li>
           ))}
         </motion.ul>
       </AnimatePresence>
     </div>
-  );
+  )
 }
 
-// Preview button + hidden audio element to play 30s sample when available
 function PreviewControl({ url, durationMs }: { url?: string; durationMs?: number }) {
-  const audioRef = React.useRef<HTMLAudioElement | null>(null);
-  const [playing, setPlaying] = React.useState(false);
-  const [progress, setProgress] = React.useState(0); // 0..1
-  const totalMs = typeof durationMs === "number" && durationMs > 0 ? durationMs : undefined;
+  const audioRef = React.useRef<HTMLAudioElement | null>(null)
+  const [playing, setPlaying] = React.useState(false)
+  const [progress, setProgress] = React.useState(0)
+  const totalMs = typeof durationMs === "number" && durationMs > 0 ? durationMs : undefined
 
   React.useEffect(() => {
     return () => {
-      audioRef.current?.pause();
-    };
-  }, []);
+      audioRef.current?.pause()
+    }
+  }, [])
 
   if (!url) {
     return (
-      <div className="mt-2">
-        <Button variant="outline" disabled className="h-8 px-3 text-xs">
+      <div>
+        <Button variant="outline" disabled className="w-full h-9 text-xs bg-transparent">
           No preview available
         </Button>
       </div>
-    );
+    )
   }
 
   const onToggle = async () => {
-    const el = audioRef.current;
-    if (!el) return;
+    const el = audioRef.current
+    if (!el) return
     if (playing) {
-      el.pause();
-      setPlaying(false);
+      el.pause()
+      setPlaying(false)
     } else {
       try {
-        await el.play();
-        setPlaying(true);
+        await el.play()
+        setPlaying(true)
       } catch {
         // ignore autoplay restrictions errors
       }
     }
-  };
+  }
 
   return (
-    <div className="mt-2">
-      <div className="flex items-center gap-2">
-        <Button onClick={onToggle} className="h-8 px-3 text-xs">
-          {playing ? "⏸ Pause" : "▶️ Play Preview"}
-        </Button>
+    <div>
+      <Button
+        onClick={onToggle}
+        className="w-full h-9 text-xs bg-gradient-to-r from-[hsl(var(--primary))] to-[hsl(var(--secondary))] hover:opacity-90 transition-opacity"
+      >
+        {playing ? "⏸ Pause Preview" : "▶ Play Preview"}
+      </Button>
+
+      <div className="mt-3 space-y-2">
+        <div className="h-2 w-full overflow-hidden rounded-full bg-[hsl(var(--muted))]">
+          <div
+            className="h-full bg-gradient-to-r from-[hsl(var(--primary))] via-[hsl(var(--secondary))] to-[hsl(var(--primary))]"
+            style={{ width: `${Math.max(0, Math.min(1, progress)) * 100}%` }}
+          />
+        </div>
         {typeof totalMs === "number" ? (
-          <span className="text-xs text-[hsl(var(--muted-foreground))]">{formatMs(totalMs)}</span>
+          <p className="text-xs text-[hsl(var(--muted-foreground))] text-center">{formatMs(totalMs)}</p>
         ) : null}
       </div>
-      <div className="mt-2 h-1 w-full overflow-hidden rounded bg-[hsl(var(--muted))]">
-        <div
-          className="h-full bg-[hsl(var(--primary))]"
-          style={{ width: `${Math.max(0, Math.min(1, progress)) * 100}%` }}
-        />
-      </div>
+
       <audio
         ref={audioRef}
         src={url}
         preload="metadata"
-        controls
         controlsList="nodownload noplaybackrate"
         onEnded={() => {
-          setPlaying(false);
-          setProgress(0);
+          setPlaying(false)
+          setProgress(0)
         }}
         onTimeUpdate={(e) => {
-          const el = e.currentTarget;
-          const d = el.duration || (totalMs ? totalMs / 1000 : 0);
-          if (d > 0) setProgress(el.currentTime / d);
+          const el = e.currentTarget
+          const d = el.duration || (totalMs ? totalMs / 1000 : 0)
+          if (d > 0) setProgress(el.currentTime / d)
         }}
       />
     </div>
-  );
+  )
 }
 
 function formatMs(ms: number) {
-  const totalSec = Math.round(ms / 1000);
-  const mm = Math.floor(totalSec / 60);
-  const ss = totalSec % 60;
-  return `${mm}:${ss.toString().padStart(2, "0")}`;
+  const totalSec = Math.round(ms / 1000)
+  const mm = Math.floor(totalSec / 60)
+  const ss = totalSec % 60
+  return `${mm}:${ss.toString().padStart(2, "0")}`
 }
 
 export function LoadingPlaylist({ count = 4 }: { count?: number }) {
   return (
-    <div className="mt-8">
-      <p className="mb-4 text-sm text-[hsl(var(--muted-foreground))]">Tuning your vibe…</p>
-      <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3">
+    <div className="mt-8 sm:mt-10 md:mt-12">
+      <p className="mb-6 text-xs font-medium text-[hsl(var(--muted-foreground))] sm:mb-8 sm:text-sm">
+        Tuning your vibe…
+      </p>
+      <ul className="grid grid-cols-1 gap-4 sm:gap-5 md:grid-cols-2 lg:grid-cols-3">
         {Array.from({ length: count }).map((_, i) => (
           <li
             key={i}
-            className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-3 shadow-sm"
+            className="rounded-2xl border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-4 shadow-lg sm:p-5"
           >
-            <div className="flex items-center gap-3">
-              <div className="h-14 w-14 animate-pulse rounded-md bg-[hsl(var(--muted))]" />
-              <div className="flex-1">
-                <div className="mb-2 h-3 w-32 animate-pulse rounded bg-[hsl(var(--muted))]" />
-                <div className="h-3 w-24 animate-pulse rounded bg-[hsl(var(--muted))]" />
-              </div>
+            <div className="mb-4 h-32 w-full animate-pulse rounded-xl bg-[hsl(var(--muted))] sm:h-40" />
+            <div className="space-y-2">
+              <div className="h-4 w-3/4 animate-pulse rounded bg-[hsl(var(--muted))]" />
+              <div className="h-3 w-1/2 animate-pulse rounded bg-[hsl(var(--muted))]" />
             </div>
           </li>
         ))}
       </ul>
     </div>
-  );
+  )
 }
