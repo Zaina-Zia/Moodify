@@ -681,6 +681,20 @@ type PersonalSeeds = {
 };
 const PERSONAL_CACHE = new Map<string, PersonalSeeds>();
 
+// Cache for MusicBrainz artist tags to avoid repeated lookups per artist within session
+const ARTIST_TAGS_CACHE = new Map<string, { tags: string[]; ts: number }>();
+
+async function getArtistTagsCached(name: string, ttlMs = 12 * 60 * 60 * 1000): Promise<string[]> {
+  const key = (name || "").trim().toLowerCase();
+  if (!key) return [];
+  const now = Date.now();
+  const hit = ARTIST_TAGS_CACHE.get(key);
+  if (hit && now - hit.ts < ttlMs) return hit.tags;
+  const tags = await fetchMBArtistTagsByName(name).catch(() => []);
+  ARTIST_TAGS_CACHE.set(key, { tags, ts: now });
+  return tags;
+}
+
 async function fetchPersonalSeeds(userToken: string): Promise<PersonalSeeds | null> {
   try {
     // Identify user
@@ -810,32 +824,24 @@ export async function POST(req: NextRequest) {
     const results: Track[] = [];
     const seen = new Set<string>();
 
-    // Prepend user's top tracks (if any), preserving mood context but prioritizing user's taste
-    if (personal?.topTrackIds?.length) {
+    // Use user taste only as ANCHORS: fetch similar tracks via artist top tracks and recommendations (not direct reuse of user's top tracks)
+    let anchorCandidates: Track[] = [];
+    if (personal && userAccessToken) {
       try {
-        const ids = Array.from(new Set(personal.topTrackIds)).slice(0, 10);
-        if (ids.length) {
-          const url = new URL("https://api.spotify.com/v1/tracks");
-          url.searchParams.set("ids", ids.join(","));
-          const resTop = await fetchWithRetry(url.toString(), { headers: { Authorization: `Bearer ${userAccessToken}` }, cache: "no-store" });
-          if (resTop.ok) {
-            const jTop = (await resTop.json()) as any;
-            const items: any[] = jTop?.tracks ?? [];
-            for (const t of items) {
-              const key = `${t?.name}@@${(t?.artists?.map((a: any) => a?.name) ?? []).join(', ')}`;
-              if (seen.has(key)) continue;
-              seen.add(key);
-              results.push({
-                title: t?.name ?? "",
-                artist: (t?.artists?.map((a: any) => a?.name) ?? []).join(", "),
-                cover: t?.album?.images?.[1]?.url || t?.album?.images?.[0]?.url || "",
-                previewUrl: t?.preview_url || null,
-                spotifyUrl: t?.external_urls?.spotify || (t?.id ? `https://open.spotify.com/track/${t.id}` : undefined),
-              });
-              if (results.length >= 10) break;
-            }
-          }
+        if (personal.topArtistIds?.length) {
+          const viaArtists = await fetchArtistsTopTracks(userAccessToken, personal.topArtistIds.slice(0, 6), "US", 2, 10);
+          anchorCandidates = anchorCandidates.concat(viaArtists);
         }
+        const moodSeeds = (MOOD_TO_SEEDS[selectedMood] || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const recs = await fetchRecommendationsWithSeeds(userAccessToken, {
+          artists: personal.topArtistIds?.slice(0, 5),
+          tracks: personal.topTrackIds?.slice(0, 5),
+          genres: moodSeeds.slice(0, 3),
+        }, 15, "US");
+        anchorCandidates = anchorCandidates.concat(recs);
       } catch {}
     }
 
@@ -845,6 +851,18 @@ export async function POST(req: NextRequest) {
     const candidatesRaw = await searchSpotifyTracksMulti(userAccessToken || token, queries, 8, 100);
     let candidates = scoreAndMapCandidates(candidatesRaw, taste, selectedMood);
 
+    // Merge in anchor candidates (artist top tracks + recommendations) and de-dup
+    const keyOf = (t: Track) => `${t.title}@@${t.artist}`;
+    const merged: Track[] = [];
+    const seenCand = new Set<string>();
+    for (const t of [...anchorCandidates, ...candidates]) {
+      const k = keyOf(t);
+      if (seenCand.has(k)) continue;
+      seenCand.add(k);
+      merged.push(t);
+    }
+    candidates = merged;
+
     // Exclude user's top tracks unless they match mood keywords
     if (taste.topTrackIds.size) {
       const moodKw = (MOOD_PROFILE[selectedMood as keyof typeof MOOD_PROFILE] || MOOD_PROFILE.Happy).keywords.map((k) => k.toLowerCase());
@@ -853,7 +871,64 @@ export async function POST(req: NextRequest) {
         return ok;
       });
     }
-    for (const t of candidates) {
+    // Prefetch artist tags for candidates (primary artist only) using MusicBrainz, cached
+    const primaryArtists = Array.from(new Set(candidates
+      .map((t) => (t.artist || "").split(",")[0]?.trim())
+      .filter(Boolean)
+    ));
+    const artistTagsMap = new Map<string, string[]>();
+    if (primaryArtists.length) {
+      const tagLists = await runWithConcurrency(primaryArtists, 5, (name) => getArtistTagsCached(name));
+      tagLists.forEach((tags, i) => {
+        const key = (primaryArtists[i] || "").toLowerCase();
+        artistTagsMap.set(key, (tags || []).map((s) => s.toLowerCase()));
+      });
+    }
+    // Score candidates with 60% mood alignment, 40% user taste alignment
+    const moodProfile = MOOD_PROFILE[selectedMood as keyof typeof MOOD_PROFILE] || MOOD_PROFILE.Happy;
+    const moodKw = moodProfile.keywords.map((s) => s.toLowerCase());
+    const moodGenres = new Set((moodProfile.exampleGenres || []).map((g) => g.toLowerCase()));
+    const moodTags = new Set<string>([...moodKw, ...moodGenres]);
+    const tasteGenres = new Set((taste.genres || []).map((g) => g.toLowerCase()));
+    const tasteArtists = new Set((taste.artistNames || []).map((a) => a.toLowerCase()));
+    const tasteTags = new Set((taste.tags || []).map((t) => t.toLowerCase()));
+
+    const scoredCandidates = candidates.map((t) => {
+      const hay = `${t.title} ${t.artist}`.toLowerCase();
+      const primary = (t.artist || "").split(",")[0]?.trim().toLowerCase();
+      const artistTags = primary ? (artistTagsMap.get(primary) || []) : [];
+      // moodScore: keyword hits + genre overlap with mood exampleGenres
+      let moodScore = 0;
+      for (const k of moodKw) if (hay.includes(k)) moodScore += 1;
+      // Approx genre overlap using text; if cover/spotify data includes genres it's not present here, so infer via keywords in title/artist
+      let moodGenreOverlap = 0;
+      for (const g of moodGenres) if (hay.includes(g)) moodGenreOverlap += 1;
+      moodScore += Math.min(2, moodGenreOverlap);
+      // Tag overlap with mood tags (from MB artist tags)
+      let moodTagOverlap = 0;
+      for (const tag of artistTags) if (moodTags.has(tag)) moodTagOverlap += 1;
+      moodScore += Math.min(2, moodTagOverlap);
+
+      // tasteScore: artist name overlap + user genre tokens present in title/artist
+      let tasteScore = 0;
+      for (const a of tasteArtists) if (a && hay.includes(a)) tasteScore += 2; // strong boost if known artist
+      let tasteGenreOverlap = 0;
+      for (const g of tasteGenres) if (hay.includes(g)) tasteGenreOverlap += 1;
+      tasteScore += Math.min(2, tasteGenreOverlap);
+      // Tag overlap with user's taste tags (aggregated from their artists via MB)
+      let tasteTagOverlap = 0;
+      for (const tag of artistTags) if (tasteTags.has(tag)) tasteTagOverlap += 1;
+      tasteScore += Math.min(2, tasteTagOverlap);
+
+      // small popularity proxy: prefer entries with previewUrl present
+      const pop = t.previewUrl ? 0.5 : 0;
+
+      const final = 0.6 * moodScore + 0.4 * tasteScore + pop * 0.1;
+      return { t, final };
+    });
+    scoredCandidates.sort((a, b) => b.final - a.final);
+
+    for (const { t } of scoredCandidates) {
       const key = `${t.title}@@${t.artist}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -909,15 +984,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Mood relevance re-weighting
-    const keys = MOOD_KEYWORDS[selectedMood] ?? [];
-    const score = (t: Track) => {
-      const hay = `${t.title} ${t.artist}`.toLowerCase();
-      let s = 0;
-      for (const k of keys) if (hay.includes(k)) s += 1;
-      return s;
-    };
-    results.sort((a, b) => score(b) - score(a));
+    // Already sorted by weighted mood/taste; keep order
 
     const final = combinePersonalAndMoodTracks(results, [], new Set<string>(), 25);
     const finalTracks = final.slice(0, Math.max(10, Math.min(15, final.length)));
