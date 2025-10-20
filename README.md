@@ -1,36 +1,57 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Moodify
 
-## Getting Started
+Discover music that feels like you.
 
-First, run the development server:
+Moodify transforms how you explore songs by generating playlists that match your current mood and listening taste. Instead of generic recommendations, the app crafts emotionally aligned soundscapes — whether you’re relaxed, energized, melancholic, or somewhere in between.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+It’s not just another playlist generator — it’s a dynamic listening companion that understands your vibe.
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+---
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Core Features
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### Mood-Based Playlists
+Select your current mood, and Moodify curates songs that capture its tone — energetic beats for “Happy,” calm instrumentals for “Chill,” or soft acoustics for “Sad.” Each playlist is uniquely generated to reflect your emotional state.
 
-## Learn More
+### Personalized Suggestions
+Your top tracks and past preferences influence every recommendation. The more you interact with Moodify, the better it understands your taste, producing playlists that balance familiarity with discovery.
 
-To learn more about Next.js, take a look at the following resources:
+### Smart Search
+Easily search for tracks, artists, or genres to refine your mood playlist. The search blends your input with your selected mood, so results stay relevant and consistent with your current atmosphere.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### Intuitive Interface
+The interface is minimal and fluid — focusing attention on the music rather than clutter. Cards display each track’s title, artist, and cover, with a built-in preview button for quick listening.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+### Real-Time Refresh
+Playlists dynamically update based on your chosen mood or refined preferences, ensuring every session feels personalized and alive.
 
-## Deploy on Vercel
+### Mood Selector
+A simple, clean control at the top of the app lets you toggle between moods. Each selection instantly reshapes the playlist below, visually shifting to match the mood’s tone through subtle UI color changes.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### Responsive Design
+Moodify is built for all devices, adapting fluidly from desktop to mobile for a consistent experience anywhere you listen.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+---
+
+## Visual and User Experience
+
+The overall layout is built around calm, immersive color gradients that change depending on your selected mood.  
+Typography is simple and readable, while the layout maintains balance between visual appeal and focus.
+
+- **Home Page:** Mood selector and playlist grid in a centered layout.  
+- **Track Cards:** Compact, hover-responsive song cards with album art and short info.  
+- **Mood Change Animation:** Smooth transitions as the mood (and theme) changes.  
+- **Preview Player:** A lightweight embedded audio preview for each track.  
+
+Each interaction — from switching moods to hovering over a song — is designed to feel natural, subtle, and responsive.
+
+---
+
+## Non-Functional Highlights
+
+- **Performance:** UI updates occur instantly upon user input, maintaining fluid navigation and minimal load delays.  
+- **Usability:** All features are accessible within two clicks or taps; the design prioritizes clarity and ease of exploration.  
+- **Consistency:** Colors, font sizes, and component spacing follow a uniform design system for a cohesive aesthetic.  
+- **Reliability:** Core features (mood selection, song listing, and previews) function smoothly across browsers and devices.  
+
+---
