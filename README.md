@@ -1,6 +1,6 @@
 # Moodify
 
-Discover music that feels like you.
+Discover music that feels like you, access the project <a href= "https://moodify-tau-five.vercel.app/"> here </a>
 
 Moodify transforms how you explore songs by generating playlists that match your current mood and listening taste. Instead of generic recommendations, the app crafts emotionally aligned soundscapes — whether you’re relaxed, energized, melancholic, or somewhere in between.
 
