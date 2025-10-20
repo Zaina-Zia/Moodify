@@ -38,17 +38,34 @@ Moodify is built for all devices, adapting fluidly from desktop to mobile for a 
 The overall layout is built around calm, immersive color gradients that change depending on your selected mood.  
 Typography is simple and readable, while the layout maintains balance between visual appeal and focus.
 
-- **Home Page:** Mood selector and playlist grid in a centered layout.
-  
-<img width="753" height="690" alt="image" src="https://github.com/user-attachments/assets/653412f2-3a33-4c0f-ac6e-8ff5951b9be0" />
+---
 
-- **Track Cards:** Compact, hover-responsive song cards with album art and short info.
-  
-  <img width="831" height="571" alt="image" src="https://github.com/user-attachments/assets/e6abda2c-100a-4b32-8eea-7aaf45d4bd97" />
+### **Home Page**
+Mood selector and playlist grid in a centered layout.
 
-- **Preview Player:** A lightweight embedded audio preview for each track.
-  <img width="355" height="429" alt="image" src="https://github.com/user-attachments/assets/cceb696c-a0ff-4b1a-99ae-3d877b5e1def" />
+<p align="center">
+  <img width="753" height="690" alt="Home Page" src="https://github.com/user-attachments/assets/653412f2-3a33-4c0f-ac6e-8ff5951b9be0" />
+</p>
 
+---
+
+### **Track Cards**
+Compact, hover-responsive song cards with album art and short info.
+
+<p align="center">
+  <img width="831" height="571" alt="Track Cards" src="https://github.com/user-attachments/assets/e6abda2c-100a-4b32-8eea-7aaf45d4bd97" />
+</p>
+
+---
+
+### **Preview Player**
+A lightweight embedded audio preview for each track.
+
+<p align="center">
+  <img width="355" height="429" alt="Preview Player" src="https://github.com/user-attachments/assets/cceb696c-a0ff-4b1a-99ae-3d877b5e1def" />
+</p>
+
+---
 
 Each interaction — from switching moods to hovering over a song — is designed to feel natural, subtle, and responsive.
 
