@@ -6,12 +6,20 @@ import { Button } from "@/components/ui/button"
 import type { Track } from "@/lib/playlist"
 import * as React from "react"
 
+// Global preview controller: ensures only one preview plays at a time
+let globalPreview: { audio: HTMLAudioElement | null; stop: (() => void) | null } = {
+  audio: null,
+  stop: null,
+}
+
 export function PlaylistResult({
   tracks,
   onBack,
+  comfort,
 }: {
   tracks: Track[]
   onBack: () => void
+  comfort?: string
 }) {
   const [saving, setSaving] = React.useState(false)
 
@@ -50,23 +58,33 @@ export function PlaylistResult({
 
   return (
     <div className="mt-8 sm:mt-10 md:mt-12">
+      {comfort ? (
+        <div className="mb-5 overflow-hidden rounded-2xl border border-[hsl(var(--primary))]/40 bg-gradient-to-br from-[hsl(var(--primary))]/80 via-[hsl(var(--secondary))]/70 to-[hsl(var(--primary))]/80 shadow-lg ring-1 ring-[hsl(var(--primary))]/40">
+          <div className="flex items-start gap-3 p-4 sm:p-5">
+            <div className="mt-0.5 grid h-8 w-8 place-items-center rounded-full bg-white/20 text-white text-sm font-bold">♪</div>
+            <p className="text-sm leading-relaxed text-white/95">
+              {comfort}
+            </p>
+          </div>
+        </div>
+      ) : null}
+
       <div className="mb-6 flex flex-col gap-3 sm:mb-8 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-[hsl(var(--foreground))] sm:text-3xl">Your personalized playlist</h2>
-          <p className="mt-1 text-sm text-[hsl(var(--muted-foreground))]">Curated just for your mood</p>
+          <h2 className="text-2xl font-bold text-[hsl(var(--primary))] sm:text-3xl">Your personalized playlist</h2>
+          <p className="mt-1 text-sm text-[hsl(var(--foreground))]">Curated just for your mood</p>
         </div>
         <div className="flex w-full sm:w-auto gap-2">
           <Button
-            variant="outline"
             onClick={onBack}
-            className="flex-1 sm:flex-none text-white border-primary/30 hover:border-primary/60 hover:bg-primary/10 bg-transparent"
+            className="flex-1 sm:flex-none h-9 text-xs bg-gradient-to-r from-[hsl(var(--primary))] to-[hsl(var(--secondary))] hover:opacity-90 text-white"
           >
             Try another mood
           </Button>
           <Button
             onClick={onSaveToSpotify}
             disabled={saving}
-            className="flex-1 sm:flex-none h-9 text-xs bg-[#1DB954] hover:opacity-90"
+            className="flex-1 sm:flex-none h-9 text-xs bg-gradient-to-r from-[hsl(var(--primary))] to-[hsl(var(--secondary))] hover:opacity-90 text-white"
           >
             {saving ? "Saving…" : "Save to Spotify"}
           </Button>
@@ -127,7 +145,13 @@ function PreviewControl({ url, durationMs }: { url?: string; durationMs?: number
 
   React.useEffect(() => {
     return () => {
-      audioRef.current?.pause()
+      const el = audioRef.current
+      if (!el) return
+      if (globalPreview.audio === el) {
+        globalPreview.audio = null
+        globalPreview.stop = null
+      }
+      el.pause()
     }
   }, [])
 
@@ -149,6 +173,16 @@ function PreviewControl({ url, durationMs }: { url?: string; durationMs?: number
       setPlaying(false)
     } else {
       try {
+        // Stop any previous preview before playing this one
+        if (globalPreview.audio && globalPreview.audio !== el) {
+          try { globalPreview.stop?.() } catch {}
+          try { globalPreview.audio.pause() } catch {}
+        }
+        globalPreview.audio = el
+        globalPreview.stop = () => {
+          try { el.pause() } catch {}
+          setPlaying(false)
+        }
         await el.play()
         setPlaying(true)
       } catch {
@@ -183,6 +217,10 @@ function PreviewControl({ url, durationMs }: { url?: string; durationMs?: number
         src={url}
         preload="metadata"
         controlsList="nodownload noplaybackrate"
+        onPause={() => {
+          // Keep UI in sync when paused externally
+          setPlaying(false)
+        }}
         onEnded={() => {
           setPlaying(false)
           setProgress(0)

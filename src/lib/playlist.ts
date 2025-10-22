@@ -11,6 +11,8 @@ export type PersonalizationMeta = {
   username?: string;
 };
 
+export type Language = "any" | "english" | "urdu";
+
 const titles = [
   "Neon Dreams",
   "Midnight Coffee",
@@ -87,16 +89,16 @@ export function analyzePrompt(prompt: string):
 }
 
 // Client-side wrappers to call our API. Falls back to mock on failure.
-export async function fetchPlaylistByMood(mood: string): Promise<{ tracks: Track[]; usedMock: boolean; meta?: PersonalizationMeta }> {
+export async function fetchPlaylistByMood(mood: string, language: Language = "any"): Promise<{ tracks: Track[]; usedMock: boolean; meta?: PersonalizationMeta }> {
   try {
     const res = await fetch("/api/generatePlaylist", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mood }),
+      body: JSON.stringify({ mood, language }),
     });
     const data = (await res.json()) as { ok: boolean; tracks?: Track[]; meta?: PersonalizationMeta; mood?: string };
     if (data.ok && data.tracks && data.tracks.length) {
-      const enriched = await enrichTracksWithSpotifyPreview(data.tracks, data.mood);
+      const enriched = await enrichTracksWithSpotifyPreview(data.tracks, data.mood, language);
       return { tracks: enriched, usedMock: false, meta: data.meta };
     }
     return { tracks: generatePlaylist(mood), usedMock: true, meta: undefined };
@@ -105,16 +107,16 @@ export async function fetchPlaylistByMood(mood: string): Promise<{ tracks: Track
   }
 }
 
-export async function fetchPlaylistByPrompt(prompt: string): Promise<{ tracks: Track[]; usedMock: boolean; meta?: PersonalizationMeta }> {
+export async function fetchPlaylistByPrompt(prompt: string, language: Language = "any"): Promise<{ tracks: Track[]; usedMock: boolean; meta?: PersonalizationMeta }> {
   try {
     const res = await fetch("/api/generatePlaylist", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ prompt, language }),
     });
     const data = (await res.json()) as { ok: boolean; tracks?: Track[]; meta?: PersonalizationMeta; mood?: string };
     if (data.ok && data.tracks && data.tracks.length) {
-      const enriched = await enrichTracksWithSpotifyPreview(data.tracks, data.mood);
+      const enriched = await enrichTracksWithSpotifyPreview(data.tracks, data.mood, language);
       return { tracks: enriched, usedMock: false, meta: data.meta };
     }
     return { tracks: generatePlaylistFromPrompt(prompt), usedMock: true, meta: undefined };
@@ -123,14 +125,14 @@ export async function fetchPlaylistByPrompt(prompt: string): Promise<{ tracks: T
   }
 }
 
-async function enrichTracksWithSpotifyPreview(tracks: Track[], mood?: string): Promise<Track[]> {
+async function enrichTracksWithSpotifyPreview(tracks: Track[], mood?: string, language: Language = "any"): Promise<Track[]> {
   try {
     const body = {
       tracks: tracks.map((t) => ({ title: t.title, artist: t.artist })),
       limit_per_track_search: 3,
       concurrency_limit: 3,
       mood: mood ?? null,
-      market: "US",
+      market: language === "urdu" ? "PK" : "US",
     };
     const res = await fetch("/api/spotifyPreview", {
       method: "POST",

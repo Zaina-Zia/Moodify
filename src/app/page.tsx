@@ -5,7 +5,8 @@ import { MoodSelection } from "@/components/mood-selection"
 import { CustomMoodInput } from "@/components/custom-mood-input"
 import { Separator } from "@/components/ui/separator"
 import { Headphones } from "lucide-react"
-import { fetchPlaylistByMood, analyzePrompt, type Track, type PersonalizationMeta } from "@/lib/playlist"
+import { fetchPlaylistByMood, fetchPlaylistByPrompt, type Track, type PersonalizationMeta, type Language } from "@/lib/playlist"
+
 import { PlaylistResult, LoadingPlaylist } from "@/components/playlist-result"
 
 export default function Page() {
@@ -15,6 +16,7 @@ export default function Page() {
   const [meta, setMeta] = useState<PersonalizationMeta | undefined>(undefined)
   const [lastQuery, setLastQuery] = useState<string | null>(null)
   const [me, setMe] = useState<{ display_name?: string; images?: { url: string }[] } | null>(null)
+  const [language, setLanguage] = useState<Language>("any")
 
   useEffect(() => {
     ;(async () => {
@@ -35,11 +37,11 @@ export default function Page() {
     setLoading(true)
     setTracks(null)
     setTimeout(async () => {
-      const { tracks: list, usedMock, meta } = await fetchPlaylistByMood(mood)
+      const { tracks: list, usedMock, meta } = await fetchPlaylistByMood(mood, language)
       if (usedMock) {
         // Minimal friendly notice
-        console.warn("Couldn't fetch Spotify playlist, showing mock vibes instead 🎧")
-        if (typeof window !== "undefined") alert("Couldn't fetch playlist, showing mock vibes instead 🎧")
+        console.warn("Couldn't fetch Spotify playlist, showing mock vibes instead ")
+        if (typeof window !== "undefined") alert("Couldn't fetch playlist, showing mock vibes instead ")
       }
       setTracks(list)
       setMeta(meta)
@@ -55,11 +57,10 @@ export default function Page() {
     setLoading(true)
     setTracks(null)
     setTimeout(async () => {
-      const derivedMood = analyzePrompt(prompt)
-      const { tracks: list, usedMock, meta } = await fetchPlaylistByMood(derivedMood)
+      const { tracks: list, usedMock, meta } = await fetchPlaylistByPrompt(prompt, language)
       if (usedMock) {
-        console.warn("Couldn't fetch Spotify playlist, showing mock vibes instead 🎧")
-        if (typeof window !== "undefined") alert("Couldn't fetch playlist, showing mock vibes instead 🎧")
+        console.warn("Couldn't fetch Spotify playlist, showing mock vibes instead ")
+        if (typeof window !== "undefined") alert("Couldn't fetch playlist, showing mock vibes instead ")
       }
       setTracks(list)
       setMeta(meta)
@@ -106,13 +107,30 @@ export default function Page() {
         <div className="mx-auto mt-4 flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-[hsl(var(--primary))] to-[hsl(var(--secondary))] text-white shadow-lg sm:mt-6 sm:h-12 sm:w-12">
           <Headphones className="h-5 w-5 sm:h-6 sm:w-6" />
         </div>
-        <p className="mx-auto mt-4 max-w-2xl text-sm text-[hsl(var(--muted-foreground))] sm:mt-6 sm:text-base md:text-lg">
-          Select your mood or describe your vibe to get a personalized playlist.
-        </p>
+        {tracks == null && !loading && (
+          <p className="mx-auto mt-4 max-w-2xl text-sm text-[hsl(var(--muted-foreground))] sm:mt-6 sm:text-base md:text-lg">
+            Select your mood or describe your vibe to get a personalized playlist.
+          </p>
+        )}
 
         {tracks == null && !loading && (
           <>
-            <div className="mt-8 sm:mt-10 md:mt-12">
+            {/* Language selector placed above mood grid */}
+            <div className="mt-8 sm:mt-10 md:mt-12 flex items-center justify-center gap-3">
+              <label htmlFor="language" className="text-xs sm:text-sm text-[hsl(var(--muted-foreground))]">Language</label>
+              <select
+                id="language"
+                value={language}
+                onChange={(e) => setLanguage(e.target.value as Language)}
+                className="h-9 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--foreground))] px-2 text-xs sm:text-sm shadow-sm ring-1 ring-[hsl(var(--primary))]/30 focus:outline-none focus:ring-2 focus:ring-[hsl(var(--primary))]"
+              >
+                <option value="any">Default / Any</option>
+                <option value="english">English</option>
+                <option value="urdu">Urdu</option>
+              </select>
+            </div>
+
+            <div className="mt-4 sm:mt-6 md:mt-8">
               <MoodSelection onSelect={handleMoodClick} />
             </div>
 
@@ -128,7 +146,14 @@ export default function Page() {
           </>
         )}
 
-        {loading && <LoadingPlaylist count={5} />}
+        {loading && (
+          <>
+            <div className="mt-4 text-xs sm:text-sm text-[hsl(var(--muted-foreground))]">
+              Generating {lastQuery ?? 'your'} {language === 'any' ? '' : language} playlist…
+            </div>
+            <LoadingPlaylist count={5} />
+          </>
+        )}
 
         {tracks && (
           <PlaylistResult
@@ -140,6 +165,7 @@ export default function Page() {
               setLastQuery(null)
               setMeta(undefined)
             }}
+            comfort={(meta as any)?.comfort}
           />
         )}
         {tracks && meta?.personalized && (

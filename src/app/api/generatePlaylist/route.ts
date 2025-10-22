@@ -8,12 +8,16 @@ export type Track = {
   cover: string;
   previewUrl?: string | null;
   spotifyUrl?: string;
+  spotifyId?: string;
+  artistIds?: string[];
+  primaryArtistId?: string;
   matchReason?: string;
 };
 
 type Payload = {
   mood?: string;
   prompt?: string;
+  language?: 'any' | 'english' | 'urdu';
 };
 
 // Map moods to Spotify recommendations seed genres (VALID seeds only)
@@ -73,6 +77,204 @@ async function withTimeout<T>(p: Promise<T>, ms = 10000): Promise<T> {
     clearTimeout(t);
     throw e;
   }
+
+}
+function clamp01(x: number) { return Math.max(0, Math.min(1, x)); }
+
+function scoreByFormula(params: { tracks: Track[]; features: Map<string, AudioFeatures>; taste: TasteProfile; mood: string; lang: 'any'|'english'|'urdu'; artistGenresMap: Map<string, string[]>; customTargets?: Partial<MoodTargets>; }): Track[] {
+  const { tracks, features, taste, mood, lang, artistGenresMap, customTargets } = params;
+  const base = getMoodTargets(mood);
+  const t: MoodTargets = {
+    valence: customTargets?.valence ?? base.valence,
+    energy: customTargets?.energy ?? base.energy,
+    danceability: customTargets?.danceability ?? base.danceability,
+    tempo: customTargets?.tempo ?? base.tempo,
+  };
+  const has = (x: any) => typeof x === 'number' && !Number.isNaN(x);
+  const getGenres = (tr: Track) => (tr.artistIds || []).flatMap((id) => artistGenresMap.get(id) || []);
+  const tasteGenresSet = new Set(taste.genres.map((g) => g.toLowerCase()));
+
+  type Scored = { tr: Track; score: number };
+  const out: Scored[] = [];
+  for (const tr of tracks) {
+    const id = tr.spotifyId || '';
+    const f = (id && features.get(id)) || undefined;
+    // mood_match: 1 - weighted distance (0..1)
+    let moodMatch = 0.5;
+    if (f) {
+      const dv = has(f.valence!) ? Math.abs((f.valence as number) - (t.valence ?? 0.6)) : 0.6;
+      const de = has(f.energy!) ? Math.abs((f.energy as number) - (t.energy ?? 0.6)) : 0.6;
+      const dd = has(f.danceability!) ? Math.abs((f.danceability as number) - (t.danceability ?? 0.6)) : 0.6;
+      const dtempo = has(f.tempo!) && t.tempo ? Math.abs((f.tempo as number) - (t.tempo as number)) / 60 : 1.0;
+      const dist = dv * 0.35 + de * 0.35 + dd * 0.2 + dtempo * 0.1;
+      moodMatch = clamp01(1 - dist);
+    }
+
+    // taste_match
+    let inLib = 0;
+    if (id) {
+      if (taste.topTrackIds.has(id)) inLib = 1.0; else if (taste.savedTrackIds.has(id)) inLib = 0.9; else if (taste.recentTrackIds.has(id)) inLib = 0.7;
+    }
+    let artistAff = 0;
+    const pa = tr.primaryArtistId;
+    if (pa && taste.artistIds.has(pa)) artistAff = 1.0; else if ((tr.artistIds || []).some((aid) => taste.artistIds.has(aid))) artistAff = 0.7;
+    const g = getGenres(tr).map((x) => String(x || '').toLowerCase());
+    const overlap = g.filter((gg) => tasteGenresSet.has(gg)).length;
+    const genreRatio = g.length ? overlap / g.length : 0;
+    const tasteMatch = clamp01(0.5 * inLib + 0.3 * artistAff + 0.2 * genreRatio);
+
+    // language_match
+    let langMatch = 1;
+    if (lang !== 'any') {
+      const ok = lang === 'english' ? isEnglishStrict(tr.title, tr.artist, g) : isUrduStrict(tr.title, tr.artist, g);
+      langMatch = ok ? 1 : 0;
+    }
+
+    const final = 0.5 * tasteMatch + 0.4 * moodMatch + 0.1 * langMatch;
+    out.push({ tr, score: final });
+  }
+  out.sort((a, b) => b.score - a.score);
+  return out.map((x) => x.tr);
+}
+
+// ---- Language helpers (enhanced) ----
+async function fetchArtistsGenres(token: string, artistIds: string[], market = "US"): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  const ids = Array.from(new Set(artistIds.filter(Boolean)));
+  const batch = 50;
+  for (let i = 0; i < ids.length; i += batch) {
+    const chunk = ids.slice(i, i + batch);
+    const u = new URL("https://api.spotify.com/v1/artists");
+    u.searchParams.set("ids", chunk.join(","));
+    try {
+      const res = await fetchWithRetry(u.toString(), { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+      if (!res.ok) continue;
+      const j = (await res.json()) as any;
+      const arts: any[] = j?.artists ?? [];
+      for (const a of arts) {
+        const id = String(a?.id || "");
+        if (!id) continue;
+        const gens: string[] = Array.isArray(a?.genres) ? a.genres.map((g: any) => String(g || '').toLowerCase()) : [];
+        out.set(id, gens);
+      }
+    } catch {}
+  }
+  return out;
+}
+
+// Hard mood predicate extracted for reuse without full ranking
+function passesHardForMood(mood: string, f: AudioFeatures): boolean {
+  const has = (x: any) => typeof x === 'number' && !Number.isNaN(x);
+  const key = (mood || '').toLowerCase();
+  const rules: { [k: string]: (f: AudioFeatures) => boolean } = {
+    happy: (f) => has(f.valence!) && has(f.energy!) && has(f.tempo!) && f.valence! >= 0.6 && f.energy! >= 0.5 && f.tempo! >= 100,
+    sad: (f) => has(f.valence!) && has(f.energy!) && has(f.tempo!) && f.valence! <= 0.4 && f.energy! <= 0.6 && f.tempo! <= 110,
+    chill: (f) => has(f.energy!) && has(f.tempo!) && f.energy! <= 0.55 && f.tempo! <= 105,
+    energetic: (f) => has(f.energy!) && has(f.tempo!) && f.energy! >= 0.75 && f.tempo! >= 118,
+    romantic: (f) => has(f.valence!) && has(f.energy!) && f.valence! >= 0.5 && f.valence! <= 0.85 && f.energy! <= 0.65,
+    focus: (f) => has(f.energy!) && has(f.tempo!) && f.energy! <= 0.5 && f.tempo! >= 60 && f.tempo! <= 110,
+  };
+  const pred = rules[key] || (() => true);
+  return pred(f);
+}
+
+// Compute how many anchors match the mood strictly
+async function assessMoodCoverage(token: string, tracks: Track[], mood: string): Promise<number> {
+  if (!tracks.length) return 1;
+  const ids = Array.from(new Set(tracks.map((t) => t.spotifyId).filter(Boolean))) as string[];
+  if (!ids.length) return 0;
+  const feats = await fetchAudioFeatures(token, ids);
+  let ok = 0;
+  for (const t of tracks) {
+    const id = t.spotifyId || '';
+    const f = id ? feats.get(id) : undefined;
+    if (f && passesHardForMood(mood, f)) ok++;
+  }
+  return ok / tracks.length;
+}
+
+// Expand user seed space using Spotify related artists
+async function fetchRelatedArtists(bearer: string, artistIds: string[], cap = 18): Promise<string[]> {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const id of artistIds) {
+    try {
+      const u = new URL(`https://api.spotify.com/v1/artists/${encodeURIComponent(id)}/related-artists`);
+      const res = await fetchWithRetry(u.toString(), { headers: { Authorization: `Bearer ${bearer}` }, cache: 'no-store' });
+      if (!res.ok) continue;
+      const j = (await res.json()) as any;
+      const items: any[] = j?.artists ?? [];
+      for (const a of items) {
+        const aid = String(a?.id || '');
+        if (!aid || seen.has(aid)) continue;
+        seen.add(aid);
+        out.push(aid);
+        if (out.length >= cap) return out;
+      }
+    } catch {}
+  }
+  return out;
+}
+
+function hasSouthAsianGenre(genres: string[]): boolean {
+  const G = genres.join("|");
+  return /(urdu|pakistan|pakistani|qawwali|ghazal|coke studio|punjabi|bollywood|hind(i|ustani)|desi|sufi)/i.test(G);
+}
+
+function isEnglishStrict(title: string, artist: string, artistGenres: string[]): boolean {
+  const hay = `${title} ${artist}`;
+  // Block obvious non-English/religious content
+  if (/(quran|surah|ayat|azan|adhaan|nasheed|dua|supplication|islam(ic)?|qari|qawwali|ghazal|hamd|naat)/i.test(hay)) return false;
+  if (hasSouthAsianGenre(artistGenres)) return false;
+  // Require majority Latin characters in title+artist
+  const letters = hay.replace(/[^A-Za-z\u0600-\u06FF]+/g, "");
+  const latinCount = (letters.match(/[A-Za-z]/g) || []).length;
+  const arabicCount = (letters.match(/[\u0600-\u06FF]/g) || []).length;
+  const total = latinCount + arabicCount;
+  if (total === 0) return false;
+  const latinRatio = latinCount / total;
+  if (arabicCount > 0) return false;
+  return latinRatio >= 0.7; // at least 70% Latin
+}
+
+function isUrduStrict(title: string, artist: string, artistGenres: string[]): boolean {
+  const hay = `${title} ${artist}`;
+  // Positive signals
+  const arabic = /[\u0600-\u06FF]/.test(hay);
+  if (arabic) return true;
+  if (hasSouthAsianGenre(artistGenres)) return true;
+  if (/(qawwali|ghazal|coke studio|pakistan|urdu)/i.test(hay)) return true;
+  // Exclude obvious English-only items
+  if (/[A-Za-z]/.test(hay) && !/(qawwali|ghazal|coke studio|pakistan|urdu)/i.test(hay)) return false;
+  return false;
+}
+
+// Build language-specific hint queries to bias search results if filtering is too strict
+function buildLanguageHintQueries(lang: 'any' | 'english' | 'urdu', moodKey: string): string[] {
+  const hints: string[] = [];
+  if (lang === 'urdu') {
+    // Keywords commonly tied to Urdu/Pakistani music
+    const urduHints = [
+      'qawwali',
+      'ghazal',
+      'coke studio',
+      'pakistan',
+      'urdu song',
+      'nusrat fateh ali khan',
+      'atif aslam',
+      'rahat fateh ali khan',
+      'junoon',
+    ];
+    for (const h of urduHints) hints.push(h);
+  } else if (lang === 'english') {
+    // Use generic English-leaning tokens; Spotify has no language operator
+    const engHints = ['english song', 'pop', 'rock', 'indie', 'r&b'];
+    for (const h of engHints) hints.push(h);
+  }
+  // Soften by mixing with mood keywords
+  const moodQ = MOOD_TO_QUERY[moodKey] || '';
+  const mixed = hints.map((h) => `${h} ${moodQ}`.trim());
+  return Array.from(new Set([...mixed, ...hints]));
 }
 
 async function fetchWithRetry(input: string | URL, init: RequestInit & { timeoutMs?: number } = {}, retries = 2, backoffMs = 400): Promise<Response> {
@@ -151,6 +353,34 @@ async function fetchUserTopTracks(token: string, limit = 20): Promise<SimpleTrac
   return items.map((t) => ({ id: String(t?.id || ""), title: String(t?.name || ""), artist: (t?.artists?.map((a: any) => a?.name) ?? []).join(", ") })).filter((t) => t.id);
 }
 
+async function fetchUserSavedTracks(token: string, limit = 50): Promise<SimpleTrack[]> {
+  const url = new URL("https://api.spotify.com/v1/me/tracks");
+  url.searchParams.set("limit", String(Math.min(50, Math.max(1, limit))));
+  const res = await fetchWithRetry(url.toString(), { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+  if (!res.ok) return [];
+  const j = (await res.json()) as any;
+  const items: any[] = j?.items ?? [];
+  return items
+    .map((it) => it?.track)
+    .filter(Boolean)
+    .map((t: any) => ({ id: String(t?.id || ""), title: String(t?.name || ""), artist: (t?.artists?.map((a: any) => a?.name) ?? []).join(", ") }))
+    .filter((t: SimpleTrack) => t.id);
+}
+
+async function fetchUserRecentlyPlayed(token: string, limit = 50): Promise<SimpleTrack[]> {
+  const url = new URL("https://api.spotify.com/v1/me/player/recently-played");
+  url.searchParams.set("limit", String(Math.min(50, Math.max(1, limit))));
+  const res = await fetchWithRetry(url.toString(), { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+  if (!res.ok) return [];
+  const j = (await res.json()) as any;
+  const items: any[] = j?.items ?? [];
+  return items
+    .map((it) => it?.track)
+    .filter(Boolean)
+    .map((t: any) => ({ id: String(t?.id || ""), title: String(t?.name || ""), artist: (t?.artists?.map((a: any) => a?.name) ?? []).join(", ") }))
+    .filter((t: SimpleTrack) => t.id);
+}
+
 type Seeds = { artists?: string[]; tracks?: string[] };
 // Mood profiles for heuristic (no audio-features usage)
 const MOOD_PROFILE: Record<string, { keywords: string[]; exampleGenres: string[] }> = {
@@ -161,6 +391,8 @@ const MOOD_PROFILE: Record<string, { keywords: string[]; exampleGenres: string[]
   Focus: { keywords: ["minimal", "instrumental", "ambient", "smooth", "study"], exampleGenres: ["lo-fi", "classical", "soft electronic", "piano"] },
   Romantic: { keywords: ["soft", "warm", "melodic", "heartfelt", "love"], exampleGenres: ["r&b", "soul", "acoustic pop", "romance"] },
 };
+
+// (MOOD_TO_QUERY declared later near search fallback)
 
 // MusicBrainz: fetch artist tags by name to expand genre profile
 async function fetchMBArtistTagsByName(name: string): Promise<string[]> {
@@ -187,22 +419,33 @@ async function fetchMBArtistTagsByName(name: string): Promise<string[]> {
   }
 }
 
-type TasteProfile = { artistNames: string[]; genres: string[]; tags: string[]; topTrackIds: Set<string>; recentYears: number[] };
+type TasteProfile = { artistNames: string[]; artistIds: Set<string>; genres: string[]; tags: string[]; topTrackIds: Set<string>; savedTrackIds: Set<string>; recentTrackIds: Set<string>; recentYears: number[] };
 async function buildTasteProfile(userToken?: string): Promise<TasteProfile> {
   const artistNames: string[] = [];
+  const artistIds = new Set<string>();
   const genresCounter = new Map<string, number>();
   const tagsCounter = new Map<string, number>();
   const topTrackIds = new Set<string>();
+  const savedTrackIds = new Set<string>();
+  const recentTrackIds = new Set<string>();
   const years: number[] = [];
   if (userToken) {
-    const [artists, tracks] = await Promise.all([fetchUserTopArtists(userToken, 20), fetchUserTopTracks(userToken, 20)]);
+    const [artists, tracks, saved, recent] = await Promise.all([
+      fetchUserTopArtists(userToken, 20),
+      fetchUserTopTracks(userToken, 20),
+      fetchUserSavedTracks(userToken, 50),
+      fetchUserRecentlyPlayed(userToken, 50),
+    ]);
     for (const a of artists) {
       artistNames.push(a.name);
+      if (a.id) artistIds.add(a.id);
       for (const g of a.genres || []) genresCounter.set(g.toLowerCase(), (genresCounter.get(g.toLowerCase()) || 0) + 1);
     }
     for (const t of tracks) {
       topTrackIds.add(t.id);
     }
+    for (const t of saved) savedTrackIds.add(t.id);
+    for (const t of recent) recentTrackIds.add(t.id);
     // Fetch MB tags for top 8 artists (by name)
     const top8 = artistNames.slice(0, 8);
     const mbTagsLists = await runWithConcurrency(top8, 4, (n) => fetchMBArtistTagsByName(n));
@@ -212,7 +455,7 @@ async function buildTasteProfile(userToken?: string): Promise<TasteProfile> {
   }
   const genres = Array.from(genresCounter.entries()).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k]) => k);
   const tags = Array.from(tagsCounter.entries()).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k]) => k);
-  return { artistNames, genres, tags, topTrackIds, recentYears: years };
+  return { artistNames, artistIds, genres, tags, topTrackIds, savedTrackIds, recentTrackIds, recentYears: years };
 }
 
 function buildMoodQueries(taste: TasteProfile, moodKey: string): string[] {
@@ -238,7 +481,172 @@ function buildMoodQueries(taste: TasteProfile, moodKey: string): string[] {
   return Array.from(new Set(queries));
 }
 
-async function searchSpotifyTracksMulti(token: string, queries: string[], limitEach = 8, capTotal = 100): Promise<any[]> {
+type VibeSignals = { moodKey: string; energy: 'low' | 'mid' | 'high'; tone: string; keywords: string[]; targets?: Partial<MoodTargets>; confirmation: string };
+
+function extractVibeSignals(text: string, fallbackMood = "Happy"): VibeSignals {
+  const s = (text || "").toLowerCase();
+  let moodKey = fallbackMood;
+  let energy: 'low' | 'mid' | 'high' = 'mid';
+  let tone = 'neutral';
+  const keywords: string[] = [];
+  const targets: Partial<MoodTargets> = {};
+  const contexts: string[] = [];
+
+  if (/(rain|raining|storm|monsoon)/.test(s)) {
+    contexts.push('rainy');
+    keywords.push('rain', 'lofi', 'ambient');
+    targets.energy = 0.35; targets.tempo = 80; tone = tone === 'neutral' ? 'reflective' : tone;
+  }
+  if (/(break.?up|heartbreak|heartbroken|girlfriend .*mad|boyfriend .*mad|fight|argument|arguing|mad at me)/.test(s)) {
+    moodKey = 'Sad';
+    tone = 'heartbroken';
+    keywords.push('heartbreak', 'emotional', 'ballad', 'r&b');
+    targets.valence = 0.25; targets.energy = Math.min(targets.energy ?? 1, 0.45);
+  }
+  if (/(nostalgic|nostalgia|remember|missing|old times|retro|90s|80s|2000s)/.test(s)) {
+    tone = 'nostalgic';
+    keywords.push('nostalgia', 'retro', 'lofi', 'synthwave');
+    if (moodKey === 'Energetic') moodKey = 'Chill';
+    targets.energy = Math.min(targets.energy ?? 1, 0.5); targets.tempo = Math.min(targets.tempo ?? 999, 95);
+  }
+  if (/(angry|furious|rage|pissed)/.test(s)) {
+    moodKey = 'Energetic'; energy = 'high'; tone = 'angry';
+    keywords.push('rock', 'edm', 'trap');
+    targets.energy = Math.max(targets.energy ?? 0, 0.85); targets.tempo = Math.max(targets.tempo ?? 0, 125);
+  }
+  if (/(study|focus|work|coding|deep work|concentrate|instrumental)/.test(s)) {
+    moodKey = 'Focus'; energy = 'low'; tone = 'focused';
+    keywords.push('instrumental', 'lofi', 'ambient');
+    targets.energy = 0.35; targets.valence = 0.5; targets.tempo = Math.min(targets.tempo ?? 999, 100);
+  }
+  if (/(party|dance|club|celebrat|birthday|wedding)/.test(s)) {
+    moodKey = 'Energetic'; energy = 'high'; tone = 'celebratory';
+    keywords.push('dance', 'party');
+    targets.valence = 0.8; targets.energy = 0.85; targets.tempo = Math.max(targets.tempo ?? 0, 120);
+  }
+  if (/(lonely|alone|cry|tears|blue|depress|sad)/.test(s)) {
+    moodKey = 'Sad'; tone = tone === 'neutral' ? 'sad' : tone;
+    keywords.push('piano', 'acoustic');
+    targets.valence = Math.min(targets.valence ?? 1, 0.25); targets.energy = Math.min(targets.energy ?? 1, 0.45);
+  }
+  const exclam = (s.match(/!/g) || []).length;
+  const intensifiers = (s.match(/\b(very|so|really|super|extremely)\b/g) || []).length;
+  if (exclam + intensifiers >= 2) {
+    if (moodKey === 'Sad') { targets.energy = 0.3; targets.tempo = 75; }
+    if (moodKey === 'Energetic') { targets.energy = 0.92; targets.tempo = 132; }
+  }
+  const confirmation = `Got it. ${contexts.includes('rainy') ? 'Rainy ' : ''}${tone !== 'neutral' ? tone : moodKey.toLowerCase()} vibes, right?`;
+  const uniq = Array.from(new Set(keywords)).slice(0, 8);
+  return { moodKey, energy, tone, keywords: uniq, targets: Object.keys(targets).length ? targets : undefined, confirmation };
+}
+
+function buildVibeQueries(taste: TasteProfile, moodKey: string, signals: VibeSignals): string[] {
+  const base = buildMoodQueries(taste, moodKey);
+  const kw = (signals.keywords || []).map((s) => s.toLowerCase());
+  const out: string[] = [];
+  const pick = (arr: string[], n: number) => arr.slice(0, Math.max(0, n));
+  for (const g of pick(taste.genres, 6)) {
+    for (const k of pick(kw, 3)) out.push(`genre:"${g}" ${k}`);
+  }
+  for (const a of pick(taste.artistNames, 6)) {
+    for (const k of pick(kw, 2)) out.push(`artist:"${a}" ${k}`);
+  }
+  for (const k of pick(kw, 3)) out.push(k);
+  return Array.from(new Set([...out, ...base]));
+}
+
+// ---- Comfort/Uplift catalog ----
+const COMFORT_MESSAGES: Record<string, string[]> = {
+  sad: [
+    "It's okay to feel heavy—let the music hold some of it for you.",
+    "You’re not alone. Take a breath and ease into these gentle tracks.",
+    "Soft songs for a soft heart—one step at a time.",
+    "For when words are hard, let melodies speak.",
+    "Be kind to yourself today. Here's something tender." ,
+  ],
+  reflective: [
+    "Quiet moments deserve quiet music.",
+    "A little space to think, a little sound to feel.",
+    "Slow rain, slow thoughts—let it all flow.",
+    "Breathe in, breathe out—settle into the calm.",
+    "Low lights, warm soundscape—you’re safe here.",
+  ],
+  focus: [
+    "No rush. One page, one task, one track at a time.",
+    "You’ve got this. Gentle focus, steady rhythm.",
+    "Deep work mode: on. The noise can wait.",
+    "Small progress is still progress. Keep going.",
+    "Focus first—everything else later.",
+  ],
+  nostalgic: [
+    "A little time travel for the heart.",
+    "Old feelings, new peace—let’s revisit gently.",
+    "The past can be soft. Here’s a warm rewind.",
+    "Memories in stereo—take it slow.",
+    "Golden-hour echoes for tender recollection.",
+  ],
+  angry: [
+    "Turn it up. Let the volume carry the weight.",
+    "Channel the fire—burn clean, not out.",
+    "Let it out, then let it go.",
+    "Energy for the storm—ride it, don’t drown in it.",
+    "Strong beats for strong feelings.",
+  ],
+  celebratory: [
+    "Good things deserve loud music.",
+    "Joy has a volume—let's turn it up.",
+    "You made it—now dance a little.",
+    "Smiles, basslines, and bright choruses.",
+    "Let the room feel as alive as you do.",
+  ],
+  chill: [
+    "Cozy corners, warm sound—settle in.",
+    "Low tempo, high comfort.",
+    "Soft lights and softer melodies.",
+    "Sip something warm and exhale.",
+    "This is your slow lane—welcome.",
+  ],
+  romantic: [
+    "Something tender for the heart.",
+    "Warm tones for warm feelings.",
+    "Close your eyes—lean into it.",
+    "For feelings that don’t need many words.",
+    "Soft rhythms for softer moments.",
+  ],
+  energetic: [
+    "Let the beat do the lifting.",
+    "Momentum unlocked—move how you want.",
+    "Energy on, doubts off.",
+    "Your pulse, but louder.",
+    "Hype without the hassle—go.",
+  ],
+  generic: [
+    "Here’s a little soundtrack to carry you.",
+    "A mix built for right now—press play when you’re ready.",
+    "Lean into the moment—this one’s tuned for you.",
+    "Music that meets you where you are.",
+    "Take what you need and leave the rest—track by track.",
+  ],
+};
+
+function pickComfortMessage(signals: VibeSignals | null, moodKey: string): string {
+  const tone = signals?.tone || '';
+  const m = (signals?.moodKey || moodKey || 'Happy').toLowerCase();
+  let bucket = 'generic';
+  if (tone === 'heartbroken' || m === 'sad') bucket = 'sad';
+  else if (tone === 'nostalgic') bucket = 'nostalgic';
+  else if (tone === 'focused' || m === 'focus') bucket = 'focus';
+  else if (tone === 'angry') bucket = 'angry';
+  else if (tone === 'celebratory') bucket = 'celebratory';
+  else if (m === 'romantic') bucket = 'romantic';
+  else if (m === 'energetic') bucket = 'energetic';
+  else if (m === 'chill') bucket = 'chill';
+  else if (m === 'happy') bucket = 'celebratory';
+  const arr = COMFORT_MESSAGES[bucket] || COMFORT_MESSAGES.generic;
+  return arr[Math.floor(Math.random() * arr.length)] || COMFORT_MESSAGES.generic[0];
+}
+
+async function searchSpotifyTracksMulti(token: string, queries: string[], limitEach = 8, capTotal = 100, market = "US"): Promise<any[]> {
   const out: any[] = [];
   const seenIds = new Set<string>();
   for (const q of queries) {
@@ -247,7 +655,7 @@ async function searchSpotifyTracksMulti(token: string, queries: string[], limitE
     url.searchParams.set("q", q);
     url.searchParams.set("type", "track");
     url.searchParams.set("limit", String(limitEach));
-    url.searchParams.set("market", "US");
+    url.searchParams.set("market", market);
     try {
       const res = await fetchWithRetry(url.toString(), { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
       if (!res.ok) continue;
@@ -265,11 +673,12 @@ async function searchSpotifyTracksMulti(token: string, queries: string[], limitE
   return out;
 }
 
-function scoreAndMapCandidates(items: any[], taste: TasteProfile, moodKey: string): Track[] {
+function scoreAndMapCandidates(items: any[], taste: TasteProfile, moodKey: string, contextKeywords?: string[]): Track[] {
   const profile = MOOD_PROFILE[moodKey as keyof typeof MOOD_PROFILE] || MOOD_PROFILE.Happy;
   const kw = profile.keywords.map((s) => s.toLowerCase());
   const tasteGenres = new Set(taste.genres.map((g) => g.toLowerCase()));
   const tasteArtists = new Set(taste.artistNames.map((a) => a.toLowerCase()));
+  const ctx = (contextKeywords || []).map((s) => s.toLowerCase());
   const nowYear = new Date().getFullYear();
   const tracks: Array<{ t: Track; score: number; pop: number }> = [];
   const keyOf = (n: any) => `${n?.name}@@${(n?.artists?.map((a: any) => a?.name) ?? []).join(', ')}`;
@@ -288,6 +697,9 @@ function scoreAndMapCandidates(items: any[], taste: TasteProfile, moodKey: strin
     if (artistNames.some((a) => tasteArtists.has((a || "").toLowerCase()))) s += 1;
     if (kw.some((w) => hay.includes(w))) s += 2;
     if (Array.from(tasteGenres).some((g) => hay.includes(g))) s += 1;
+    if (ctx.length) {
+      let hits = 0; for (const c of ctx) if (c && hay.includes(c)) hits += 1; s += Math.min(3, hits);
+    }
     if (year && nowYear - year <= 10) s += 1;
     const pop = Number(n?.popularity ?? 0) || 0;
     const track: Track = {
@@ -296,6 +708,9 @@ function scoreAndMapCandidates(items: any[], taste: TasteProfile, moodKey: strin
       cover: n?.album?.images?.[1]?.url || n?.album?.images?.[0]?.url || "",
       previewUrl: n?.preview_url || null,
       spotifyUrl: n?.external_urls?.spotify || (n?.id ? `https://open.spotify.com/track/${n.id}` : undefined),
+      spotifyId: n?.id || undefined,
+      artistIds: (n?.artists?.map((a: any) => a?.id).filter(Boolean)) || [],
+      primaryArtistId: n?.artists?.[0]?.id || undefined,
       matchReason: buildMatchReason({ artistNames, hay, kw, tasteGenres }),
     };
     tracks.push({ t: track, score: s, pop });
@@ -311,6 +726,79 @@ function buildMatchReason(args: { artistNames: string[]; hay: string; kw: string
   if (kw.some((w) => hay.includes(w))) reasons.push("fits the mood keywords");
   if (Array.from(tasteGenres).some((g) => hay.includes(g))) reasons.push("matches your genres");
   return reasons.length ? reasons.join(", ") : "discovery for your mood";
+}
+
+// ---- Audio Features helpers ----
+type AudioFeatures = { id: string; valence?: number; energy?: number; danceability?: number; tempo?: number };
+async function fetchAudioFeatures(token: string, ids: string[]): Promise<Map<string, AudioFeatures>> {
+  const out = new Map<string, AudioFeatures>();
+  const batchSize = 80;
+  for (let i = 0; i < ids.length; i += batchSize) {
+    const chunk = ids.slice(i, i + batchSize);
+    if (!chunk.length) continue;
+    const u = new URL("https://api.spotify.com/v1/audio-features");
+    u.searchParams.set("ids", chunk.join(","));
+    try {
+      const res = await fetchWithRetry(u.toString(), { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+      if (!res.ok) continue;
+      const j = (await res.json()) as any;
+      const arr: any[] = j?.audio_features ?? [];
+      for (const f of arr) {
+        const id = String(f?.id || "").trim();
+        if (!id) continue;
+        out.set(id, { id, valence: f?.valence, energy: f?.energy, danceability: f?.danceability, tempo: f?.tempo });
+      }
+    } catch {}
+  }
+  return out;
+}
+
+function rankByMood(tracks: Track[], features: Map<string, AudioFeatures>, mood: string): Track[] {
+  const t = getMoodTargets(mood);
+  const has = (x: any) => typeof x === 'number' && !Number.isNaN(x);
+  const within = (x: number, target: number, tol: number) => Math.abs(x - target) <= tol;
+  const hard: { [k: string]: (f: AudioFeatures) => boolean } = {
+    happy: (f) => has(f.valence!) && has(f.energy!) && has(f.tempo!) && f.valence! >= 0.6 && f.energy! >= 0.5 && f.tempo! >= 100,
+    sad: (f) => has(f.valence!) && has(f.energy!) && has(f.tempo!) && f.valence! <= 0.4 && f.energy! <= 0.6 && f.tempo! <= 110,
+    chill: (f) => has(f.energy!) && has(f.tempo!) && f.energy! <= 0.55 && f.tempo! <= 105,
+    energetic: (f) => has(f.energy!) && has(f.tempo!) && f.energy! >= 0.75 && f.tempo! >= 118,
+    romantic: (f) => has(f.valence!) && has(f.energy!) && f.valence! >= 0.5 && f.valence! <= 0.85 && f.energy! <= 0.65,
+    focus: (f) => has(f.energy!) && has(f.tempo!) && f.energy! <= 0.5 && f.tempo! >= 60 && f.tempo! <= 110,
+  };
+  const key = (mood || '').toLowerCase();
+  const passHard = hard[key] || (() => true);
+
+  const scored = tracks.map((tr) => {
+    const id = tr.spotifyId || (tr.spotifyUrl ? tr.spotifyUrl.split('/').pop() : undefined);
+    const f = (id && features.get(id)) || undefined;
+    let score = 9999; // lower is better
+    let ok = false;
+    if (f) {
+      const dv = has(f.valence!) ? Math.abs((f.valence as number) - (t.valence ?? 0.6)) : 0.6;
+      const de = has(f.energy!) ? Math.abs((f.energy as number) - (t.energy ?? 0.6)) : 0.6;
+      const dd = has(f.danceability!) ? Math.abs((f.danceability as number) - (t.danceability ?? 0.6)) : 0.6;
+      const dtempo = has(f.tempo!) && t.tempo ? Math.abs((f.tempo as number) - (t.tempo as number)) / 60 : 1.0;
+      score = dv * 0.35 + de * 0.35 + dd * 0.2 + dtempo * 0.1;
+      ok = passHard(f);
+    }
+    return { tr, score, ok };
+  });
+
+  // Prefer those that pass hard filters, then by score
+  scored.sort((a, b) => (Number(b.ok) - Number(a.ok)) || (a.score - b.score));
+  const keep = scored
+    .filter((x) => x.ok)
+    .map((x) => x.tr);
+  // If too few strict matches, take best-scored to fill up
+  let out = keep;
+  if (out.length < 12) {
+    for (const s of scored) {
+      if (out.includes(s.tr)) continue;
+      out.push(s.tr);
+      if (out.length >= 15) break;
+    }
+  }
+  return out;
 }
 
 function combinePersonalAndMoodTracks(personal: Track[], moodTracks: Track[], excludeKeys: Set<string>, total = 25): Track[] {
@@ -386,6 +874,9 @@ async function fetchArtistsTopTracks(userToken: string, artistIds: string[], mar
           cover: t?.album?.images?.[1]?.url || t?.album?.images?.[0]?.url || "",
           previewUrl: t?.preview_url || null,
           spotifyUrl: t?.external_urls?.spotify || (t?.id ? `https://open.spotify.com/track/${t.id}` : undefined),
+          spotifyId: t?.id || undefined,
+          artistIds: (t?.artists?.map((a: any) => a?.id).filter(Boolean)) || [],
+          primaryArtistId: t?.artists?.[0]?.id || undefined,
         });
         added++;
         if (added >= perArtist) break;
@@ -400,13 +891,23 @@ async function fetchArtistsTopTracks(userToken: string, artistIds: string[], mar
 // Add Spotify recommendations using user's top artists/tracks + mood seeds (if logged-in)
 // ... (rest of the code remains the same)
 // Fetch recommendations seeded by user's top artists/tracks and mood seeds
-async function fetchRecommendationsWithSeeds(bearer: string, seeds: { artists?: string[]; tracks?: string[]; genres?: string[] }, limit = 10, market = "US"): Promise<Track[]> {
+async function fetchRecommendationsWithSeeds(
+  bearer: string,
+  seeds: { artists?: string[]; tracks?: string[]; genres?: string[] },
+  limit = 10,
+  market = "US",
+  targets?: Partial<MoodTargets>
+): Promise<Track[]> {
   const url = new URL("https://api.spotify.com/v1/recommendations");
   if (seeds.artists?.length) url.searchParams.set("seed_artists", seeds.artists.slice(0, 5).join(","));
   if (seeds.tracks?.length) url.searchParams.set("seed_tracks", seeds.tracks.slice(0, 5).join(","));
   if (seeds.genres?.length) url.searchParams.set("seed_genres", seeds.genres.slice(0, 5).join(","));
   url.searchParams.set("limit", String(Math.max(1, Math.min(20, limit))));
   url.searchParams.set("market", market);
+  if (targets?.valence != null) url.searchParams.set("target_valence", String(targets.valence));
+  if (targets?.energy != null) url.searchParams.set("target_energy", String(targets.energy));
+  if (targets?.danceability != null) url.searchParams.set("target_danceability", String(targets.danceability));
+  if (targets?.tempo != null) url.searchParams.set("target_tempo", String(targets.tempo));
   const res = await fetchWithRetry(url.toString(), { headers: { Authorization: `Bearer ${bearer}` }, cache: "no-store" });
   if (!res.ok) return [];
   const json = (await res.json()) as any;
@@ -417,6 +918,9 @@ async function fetchRecommendationsWithSeeds(bearer: string, seeds: { artists?: 
     cover: t?.album?.images?.[1]?.url || t?.album?.images?.[0]?.url || "",
     previewUrl: t?.preview_url || null,
     spotifyUrl: t?.external_urls?.spotify || (t?.id ? `https://open.spotify.com/track/${t.id}` : undefined),
+    spotifyId: t?.id || undefined,
+    artistIds: (t?.artists?.map((a: any) => a?.id).filter(Boolean)) || [],
+    primaryArtistId: t?.artists?.[0]?.id || undefined,
   }));
 }
 
@@ -433,7 +937,7 @@ async function fetchListenBrainzRecordingPopularity(mbid: string): Promise<numbe
   }
 }
 
-async function searchSpotifySingle(token: string, title: string, artist: string): Promise<{ url?: string; id?: string; cover?: string; preview?: string | null } | null> {
+async function searchSpotifySingle(token: string, title: string, artist: string, market = "US"): Promise<{ url?: string; id?: string; cover?: string; preview?: string | null; artistIds?: string[] } | null> {
   const tryQueries = [
     `track:"${title.replace(/"/g, '')}" artist:"${artist.replace(/"/g, '')}"`,
     `${title} ${artist}`,
@@ -444,7 +948,7 @@ async function searchSpotifySingle(token: string, title: string, artist: string)
     u.searchParams.set("q", q);
     u.searchParams.set("type", "track");
     u.searchParams.set("limit", "1");
-    u.searchParams.set("market", "US");
+    u.searchParams.set("market", market);
     const res = await fetchWithRetry(u.toString(), { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
     if (!res.ok) continue;
     const json = (await res.json()) as any;
@@ -455,6 +959,7 @@ async function searchSpotifySingle(token: string, title: string, artist: string)
         url: item.external_urls?.spotify || (item.id ? `https://open.spotify.com/track/${item.id}` : undefined),
         cover: item.album?.images?.[1]?.url || item.album?.images?.[0]?.url || "",
         preview: item.preview_url || null,
+        artistIds: (item?.artists?.map((a: any) => a?.id).filter(Boolean)) || [],
       };
     }
   }
@@ -772,15 +1277,20 @@ async function searchTracks(token: string, mood: string, limit = 6, market = "US
     cover: t.album?.images?.[1]?.url || t.album?.images?.[0]?.url || "",
     previewUrl: t.preview_url || null,
     spotifyUrl: t?.external_urls?.spotify || (t?.id ? `https://open.spotify.com/track/${t.id}` : undefined),
+    spotifyId: t?.id || undefined,
+    artistIds: (t?.artists?.map((a: any) => a?.id).filter(Boolean)) || [],
+    primaryArtistId: t?.artists?.[0]?.id || undefined,
   }));
   return tracks;
 }
 
-export async function POST(req: NextRequest) {
+export const POST = async (req: NextRequest) => {
   try {
     const payload = (await req.json()) as Payload;
     const mood = payload.mood?.trim();
     const prompt = payload.prompt?.trim();
+    const lang = (payload.language || 'any');
+    const market = lang === 'urdu' ? 'PK' : 'US';
 
     const token = await getSpotifyToken();
     const userAccessToken = getUserAccessToken(req);
@@ -796,6 +1306,9 @@ export async function POST(req: NextRequest) {
       else if (/(party|upbeat|club|energy|energetic|edm|rock|dance)/.test(p)) selectedMood = "Energetic";
       else selectedMood = "Happy";
     }
+    // Extract vibe signals early so they can guide recommendations too
+    const signals = prompt ? extractVibeSignals(prompt, selectedMood) : null;
+    if (signals?.moodKey) selectedMood = signals.moodKey;
 
     // Optional personalization (requires logged-in user token via cookies)
     let personal: PersonalSeeds | null = null;
@@ -829,7 +1342,7 @@ export async function POST(req: NextRequest) {
     if (personal && userAccessToken) {
       try {
         if (personal.topArtistIds?.length) {
-          const viaArtists = await fetchArtistsTopTracks(userAccessToken, personal.topArtistIds.slice(0, 6), "US", 2, 10);
+          const viaArtists = await fetchArtistsTopTracks(userAccessToken, personal.topArtistIds.slice(0, 6), market, 2, 10);
           anchorCandidates = anchorCandidates.concat(viaArtists);
         }
         const moodSeeds = (MOOD_TO_SEEDS[selectedMood] || "")
@@ -840,16 +1353,41 @@ export async function POST(req: NextRequest) {
           artists: personal.topArtistIds?.slice(0, 5),
           tracks: personal.topTrackIds?.slice(0, 5),
           genres: moodSeeds.slice(0, 3),
-        }, 15, "US");
+        }, 15, market, signals?.targets || getMoodTargets(selectedMood));
         anchorCandidates = anchorCandidates.concat(recs);
+
+        // If user's anchors don't match the mood well, expand with related artists filtered by mood and retune
+        try {
+          const coverage = await assessMoodCoverage(userAccessToken || token, anchorCandidates, selectedMood);
+          if (coverage < 0.35 && (personal.topArtistIds?.length || 0) > 0) {
+            const related = await fetchRelatedArtists(userAccessToken || token, personal.topArtistIds.slice(0, 8), 20);
+            if (related.length) {
+              const profile = MOOD_PROFILE[selectedMood as keyof typeof MOOD_PROFILE] || MOOD_PROFILE.Happy;
+              const moodGenSet = new Set((profile.exampleGenres || []).map((g) => g.toLowerCase()));
+              const relGenresMap = await fetchArtistsGenres(userAccessToken || token, related, market);
+              const filteredRelated = related.filter((id) => (relGenresMap.get(id) || []).some((g) => moodGenSet.has(String(g).toLowerCase())));
+              const tunedTargets = signals?.targets || getMoodTargets(selectedMood);
+              const moodSeeds2 = (MOOD_TO_SEEDS[selectedMood] || "").split(",").map((s) => s.trim()).filter(Boolean);
+              const recs2 = await fetchRecommendationsWithSeeds(userAccessToken, { artists: filteredRelated.slice(0, 5), genres: moodSeeds2.slice(0, 3) }, 20, market, tunedTargets);
+              // Keep only strict mood matches
+              const ids2 = Array.from(new Set(recs2.map((t) => t.spotifyId).filter(Boolean))) as string[];
+              const feats2 = await fetchAudioFeatures(userAccessToken || token, ids2);
+              const strictRecs = recs2.filter((t) => {
+                const f = t.spotifyId ? feats2.get(t.spotifyId) : undefined;
+                return f ? passesHardForMood(selectedMood, f) : true;
+              });
+              anchorCandidates = anchorCandidates.concat(strictRecs);
+            }
+          }
+        } catch {}
       } catch {}
     }
 
     // Build taste and mood queries, search for candidates (no recommendations/audio-features)
     const taste = await buildTasteProfile(userAccessToken);
-    const queries = buildMoodQueries(taste, selectedMood);
-    const candidatesRaw = await searchSpotifyTracksMulti(userAccessToken || token, queries, 8, 100);
-    let candidates = scoreAndMapCandidates(candidatesRaw, taste, selectedMood);
+    const queries = signals ? buildVibeQueries(taste, selectedMood, signals) : buildMoodQueries(taste, selectedMood);
+    const candidatesRaw = await searchSpotifyTracksMulti(userAccessToken || token, queries, 8, 100, market);
+    let candidates = scoreAndMapCandidates(candidatesRaw, taste, selectedMood, signals?.keywords);
 
     // Merge in anchor candidates (artist top tracks + recommendations) and de-dup
     const keyOf = (t: Track) => `${t.title}@@${t.artist}`;
@@ -939,7 +1477,7 @@ export async function POST(req: NextRequest) {
     const searchResults = await runWithConcurrency(scored, 6, async (r) => {
       const key = `${r.title}@@${r.artist}`;
       if (seen.has(key)) return null as any;
-      const found = await searchSpotifySingle(token, r.title, r.artist);
+      const found = await searchSpotifySingle(token, r.title, r.artist, market);
       if (found?.url) {
         return { title: r.title, artist: r.artist, cover: found.cover || "", previewUrl: found.preview ?? null, spotifyUrl: found.url } as Track;
       }
@@ -958,7 +1496,7 @@ export async function POST(req: NextRequest) {
       const padResults = await runWithConcurrency(mb, 6, async (r) => {
         const key = `${r.title}@@${r.artist}`;
         if (seen.has(key)) return null as any;
-        const found = await searchSpotifySingle(token, r.title, r.artist);
+        const found = await searchSpotifySingle(token, r.title, r.artist, market);
         if (found?.url) return { title: r.title, artist: r.artist, cover: found.cover || "", previewUrl: found.preview ?? null, spotifyUrl: found.url } as Track;
         return null as any;
       });
@@ -974,7 +1512,7 @@ export async function POST(req: NextRequest) {
 
     // Fallback to Spotify mood search when results are still low, with dedupe
     if (results.length < 10) {
-      const moodSearchResults = await searchTracks(token, selectedMood, 10);
+      const moodSearchResults = await searchTracks(token, selectedMood, 10, market);
       for (const t of moodSearchResults) {
         const key = `${t.title}@@${t.artist}`;
         if (seen.has(key)) continue;
@@ -987,8 +1525,92 @@ export async function POST(req: NextRequest) {
     // Already sorted by weighted mood/taste; keep order
 
     const final = combinePersonalAndMoodTracks(results, [], new Set<string>(), 25);
-    const finalTracks = final.slice(0, Math.max(10, Math.min(15, final.length)));
-    return NextResponse.json({ ok: true, mood: tag, tracks: finalTracks, meta: { source: userAccessToken ? "personalized+search+musicbrainz" : "search+musicbrainz" } });
+
+    // Language filtering heuristics
+    function textStats(s: string) {
+      const arabic = (s.match(/[\u0600-\u06FF]/g) || []).length; // Arabic/Urdu script
+      const latin = (s.match(/[A-Za-z]/g) || []).length;
+      return { arabic, latin };
+    }
+    function isUrduTitleArtist(title: string, artist: string) {
+      const hay = `${title} ${artist}`;
+      const { arabic, latin } = textStats(hay);
+      if (arabic >= 2) return true;
+      // common Urdu/Pakistani markers in Latin script
+      if (/(urdu|pak(istan)?|qawwali|nusrat|atif|rahat|ali|khan|noor|mehdi|ghazal)/i.test(hay)) return true;
+      return false;
+    }
+    function isEnglishTitleArtist(title: string, artist: string) {
+      const hay = `${title} ${artist}`;
+      const { arabic, latin } = textStats(hay);
+      return latin >= 2 && arabic === 0;
+    }
+
+    // Fetch artist genres for stricter language classification
+    const allArtistIds = Array.from(new Set(final.flatMap((t) => t.artistIds || [])));
+    const artistGenresMap = await fetchArtistsGenres(userAccessToken || token, allArtistIds, market);
+    const getGenres = (t: Track) => {
+      const ids = t.artistIds || [];
+      const gens: string[] = [];
+      for (const id of ids) {
+        const g = artistGenresMap.get(id) || [];
+        for (const gg of g) gens.push(gg);
+      }
+      return gens;
+    };
+    const filtered = final.filter((t) => {
+      if (lang === 'any') return true;
+      const gens = getGenres(t);
+      if (lang === 'english') return isEnglishStrict(t.title, t.artist, gens);
+      if (lang === 'urdu') return isUrduStrict(t.title, t.artist, gens);
+      return true;
+    });
+    let list = filtered;
+
+    // If filtering removed too much, actively fetch more language-hinted candidates
+    if (list.length < 10) {
+      try {
+        const langQueries = buildLanguageHintQueries(lang, selectedMood);
+        if (langQueries.length) {
+          const langCandidatesRaw = await searchSpotifyTracksMulti(userAccessToken || token, langQueries, 8, 60, market);
+          let langCandidates = scoreAndMapCandidates(langCandidatesRaw, taste, selectedMood, signals?.keywords);
+          // Apply strict language filter on these candidates using genres
+          const candArtistIds = Array.from(new Set(langCandidates.flatMap((t) => t.artistIds || [])));
+          const candGenresMap = await fetchArtistsGenres(userAccessToken || token, candArtistIds, market);
+          langCandidates = langCandidates.filter((t) => {
+            const gens = (t.artistIds || []).flatMap((id) => candGenresMap.get(id) || []);
+            if (lang === 'english') return isEnglishStrict(t.title, t.artist, gens);
+            if (lang === 'urdu') return isUrduStrict(t.title, t.artist, gens);
+            return true;
+          });
+          // Dedupe with existing list
+          const k = (t: Track) => `${t.title}@@${t.artist}`;
+          const seenK = new Set(list.map(k));
+          for (const t of langCandidates) {
+            const key = k(t);
+            if (seenK.has(key)) continue;
+            seenK.add(key);
+            list.push(t);
+            if (list.length >= 15) break;
+          }
+        }
+      } catch {}
+    }
+
+    // Fetch audio features and compute final score = 0.5*taste + 0.4*mood + 0.1*language
+    const ids = Array.from(new Set(list.map((t) => t.spotifyId).filter(Boolean))) as string[];
+    const artistIdsForList = Array.from(new Set(list.flatMap((t) => t.artistIds || [])));
+    let ranked: Track[] = list;
+    try {
+      const [feats, genresMap] = await Promise.all([
+        ids.length ? fetchAudioFeatures(userAccessToken || token, ids) : Promise.resolve(new Map()),
+        artistIdsForList.length ? fetchArtistsGenres(userAccessToken || token, artistIdsForList, market) : Promise.resolve(new Map()),
+      ]);
+      ranked = scoreByFormula({ tracks: list, features: feats as Map<string, any>, taste, mood: selectedMood, lang, artistGenresMap: genresMap as Map<string, string[]>, customTargets: signals?.targets });
+    } catch {}
+    const finalTracks = ranked.slice(0, Math.max(10, Math.min(15, ranked.length)));
+    const comfort = pickComfortMessage(signals, selectedMood);
+    return NextResponse.json({ ok: true, mood: tag, tracks: finalTracks, meta: { source: userAccessToken ? "personalized+scored" : "scored", confirmation: (signals?.confirmation || undefined), comfort } });
   } catch (err: any) {
     console.error("[API /generatePlaylist] Error:", err);
     const msg = String(err?.message || "Unknown error");
@@ -996,4 +1618,5 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: msg }, { status });
   }
 }
+
 
