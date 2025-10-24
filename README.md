@@ -35,8 +35,11 @@ The project demonstrates how technology can support **mental wellness, personali
 - Logged-in users can **add playlists directly** to their Spotify library.  
 - Each playlist track includes a **preview option** before adding.
 
+<p align="center">
   <img width="799" height="766" alt="image" src="https://github.com/user-attachments/assets/56fd0308-9e81-4639-9611-625911c772d7" />
+</p>
 
+---
 
 ### ⚠️ Pre-Requisites for Spotify Login  
 - If logging in with **Google**, the user’s Spotify account must support **Google authentication**.  
@@ -56,8 +59,9 @@ The project demonstrates how technology can support **mental wellness, personali
   - 💞 Romantic  
 - The interface visually adapts to match the selected emotion through dynamic colors and animations.  
 
-<img width="724" height="466" alt="image" src="https://github.com/user-attachments/assets/13eb3f99-b19b-4769-97ee-82307f19f3ab" />
-
+<p align="center">
+  <img width="724" height="466" alt="image" src="https://github.com/user-attachments/assets/13eb3f99-b19b-4769-97ee-82307f19f3ab" />
+</p>
 
 ---
 
@@ -72,8 +76,13 @@ The project demonstrates how technology can support **mental wellness, personali
   - Preview Option  
   - *Add to Spotify* button  
 
-<img width="1095" height="874" alt="image" src="https://github.com/user-attachments/assets/7517fd72-0275-4d80-b858-5525fb48cc5b" />
-<img width="1055" height="859" alt="image" src="https://github.com/user-attachments/assets/bb3718e8-69b1-4215-b188-763ead99aa98" />
+<p align="center">
+  <img width="1095" height="874" alt="image" src="https://github.com/user-attachments/assets/7517fd72-0275-4d80-b858-5525fb48cc5b" />
+</p>
+
+<p align="center">
+  <img width="1055" height="859" alt="image" src="https://github.com/user-attachments/assets/bb3718e8-69b1-4215-b188-763ead99aa98" />
+</p>
 
 ---
 
