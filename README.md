@@ -1,7 +1,7 @@
 # 🎧 Moodify  
 **Discover music that feels like you**  
 
-[👉 Access the project here](#)  
+<a href="https://moodify-tau-five.vercel.app/"> Access the project here! </a> 
 
 ---
 
@@ -33,7 +33,10 @@ The project demonstrates how technology can support **mental wellness, personali
 - Upon login, Moodify retrieves **top tracks, artists, and listening patterns** to generate a personalized playlist.  
 - If the user **does not log in**, a **default playlist** is generated using predefined data.  
 - Logged-in users can **add playlists directly** to their Spotify library.  
-- Each playlist track includes a **preview option** before adding.  
+- Each playlist track includes a **preview option** before adding.
+
+  <img width="799" height="766" alt="image" src="https://github.com/user-attachments/assets/56fd0308-9e81-4639-9611-625911c772d7" />
+
 
 ### ⚠️ Pre-Requisites for Spotify Login  
 - If logging in with **Google**, the user’s Spotify account must support **Google authentication**.  
@@ -43,7 +46,7 @@ The project demonstrates how technology can support **mental wellness, personali
 ---
 
 ### 🌐 Language and Mood Selection  
-- **Languages Supported:** English, Urdu, and *B-word* (custom internal language).  
+- **Languages Supported:** English and Urdu. 
 - **Mood Categories:**  
   - 🎉 Happy  
   - 😢 Sad  
@@ -52,6 +55,9 @@ The project demonstrates how technology can support **mental wellness, personali
   - ⚡ Energetic  
   - 💞 Romantic  
 - The interface visually adapts to match the selected emotion through dynamic colors and animations.  
+
+<img width="724" height="466" alt="image" src="https://github.com/user-attachments/assets/13eb3f99-b19b-4769-97ee-82307f19f3ab" />
+
 
 ---
 
@@ -65,6 +71,9 @@ The project demonstrates how technology can support **mental wellness, personali
   - Album Cover  
   - Preview Option  
   - *Add to Spotify* button  
+
+<img width="1095" height="874" alt="image" src="https://github.com/user-attachments/assets/7517fd72-0275-4d80-b858-5525fb48cc5b" />
+<img width="1055" height="859" alt="image" src="https://github.com/user-attachments/assets/bb3718e8-69b1-4215-b188-763ead99aa98" />
 
 ---
 
